@@ -60,7 +60,6 @@ function safeLocalStorageSet(key, value) {
 function savePrefsToStorage() {
   const payload = {
     playMode: state.playMode,
-    playlist: state.playlist,
     stars: state.stars,
   };
   safeLocalStorageSet(PLAYLET_STORAGE_KEY, JSON.stringify(payload));
@@ -73,7 +72,6 @@ function loadPrefsFromStorage() {
     const parsed = JSON.parse(raw);
     return {
       playMode: PLAY_MODES.includes(parsed?.playMode) ? parsed.playMode : MODE_LOOP_ALL,
-      playlist: Array.isArray(parsed?.playlist) ? parsed.playlist : [],
       stars: parsed?.stars && typeof parsed.stars === "object" ? parsed.stars : {},
     };
   } catch {
@@ -916,6 +914,7 @@ function createUi(root, mediaAdapter) {
       <div class="playlet-tabs">
         <button class="playlet-tab" data-action="tab-playlist" data-role="tab-playlist">Playlist (0)</button>
         <button class="playlet-tab" data-action="tab-favorites" data-role="tab-favorites">Favorites (0)</button>
+        <button class="playlet-tab" data-action="playlist-clear" data-role="playlist-clear">Clear</button>
       </div>
     </div>
     <div class="playlet-playlist playlet-scroll-zone" data-role="playlist" data-scroll-zone="playlist"></div>
@@ -944,6 +943,7 @@ function createUi(root, mediaAdapter) {
     tree: root.querySelector('[data-role="tree"]'),
     tabPlaylist: root.querySelector('[data-role="tab-playlist"]'),
     tabFavorites: root.querySelector('[data-role="tab-favorites"]'),
+    playlistClearBtn: root.querySelector('[data-role="playlist-clear"]'),
     playlist: root.querySelector('[data-role="playlist"]'),
     now: root.querySelector('[data-role="now"]'),
     playToggleBtn: root.querySelector('[data-action="play-toggle"]'),
@@ -1211,6 +1211,7 @@ function createUi(root, mediaAdapter) {
     refs.tabFavorites.textContent = `Favorites (${getFavoriteItems().length})`;
     refs.tabPlaylist.dataset.active = state.listTab === "playlist" ? "1" : "0";
     refs.tabFavorites.dataset.active = state.listTab === "favorites" ? "1" : "0";
+    refs.playlistClearBtn.disabled = !state.playlist.length;
   }
 
   function renderPlayerOnly() {
@@ -1347,7 +1348,6 @@ function createUi(root, mediaAdapter) {
     };
 
     state.playlist.push(item);
-    savePrefsToStorage();
     setState({ playlist: state.playlist, error: "" });
     setToast("Added to playlist");
   }
@@ -1365,27 +1365,15 @@ function createUi(root, mediaAdapter) {
     };
   }
 
-  async function collectPlayableItemsRecursive(containerId, out, visited) {
-    if (!state.service || out.length >= MAX_BULK_ADD || visited.has(containerId)) return;
-    visited.add(containerId);
-    const entries = await state.service.browse(containerId, 0, 500);
-    for (const entry of entries) {
-      if (out.length >= MAX_BULK_ADD) break;
-      if (entry.kind === "item" && entry.playable && entry.bestResource?.url) {
-        out.push(entry);
-      } else if (entry.kind === "container") {
-        await collectPlayableItemsRecursive(entry.id, out, visited);
-      }
-    }
-  }
-
   async function addFolderToPlaylist(nodeId) {
     const node = getTreeNode(nodeId);
     if (!node || node.kind !== "container") return;
     try {
       setState({ busy: true, error: "" });
-      const found = [];
-      await collectPlayableItemsRecursive(nodeId, found, new Set());
+      const entries = await state.service.browse(nodeId, 0, 500);
+      const found = entries
+        .filter((entry) => entry.kind === "item" && entry.playable && entry.bestResource?.url)
+        .slice(0, MAX_BULK_ADD);
       if (!found.length) {
         setState({ busy: false });
         setToast("No playable items found");
@@ -1393,7 +1381,6 @@ function createUi(root, mediaAdapter) {
       }
       const items = found.map(makePlaylistItemFromTrack);
       state.playlist.push(...items);
-      savePrefsToStorage();
       setState({ playlist: state.playlist, busy: false, error: "" });
       setToast(`Added ${items.length}${items.length >= MAX_BULK_ADD ? "+" : ""} items`);
     } catch (err) {
@@ -1410,8 +1397,15 @@ function createUi(root, mediaAdapter) {
     if (removed.id === state.nowPlayingPlaylistId) {
       patch.nowPlayingPlaylistId = "";
     }
-    savePrefsToStorage();
     setState(patch);
+  }
+
+  function clearPlaylist() {
+    if (!state.playlist.length) return;
+    const patch = { playlist: [] };
+    if (state.nowPlayingPlaylistId) patch.nowPlayingPlaylistId = "";
+    setState(patch);
+    setToast("Playlist cleared");
   }
 
   function toggleStar(nodeId) {
@@ -1429,7 +1423,6 @@ function createUi(root, mediaAdapter) {
     if (from < 0 || to < 0) return;
     const [moved] = state.playlist.splice(from, 1);
     state.playlist.splice(to, 0, moved);
-    savePrefsToStorage();
     setState({ playlist: state.playlist });
   }
 
@@ -1567,6 +1560,10 @@ function createUi(root, mediaAdapter) {
     }
     if (action === "tab-favorites") {
       setState({ listTab: "favorites" });
+      return;
+    }
+    if (action === "playlist-clear") {
+      clearPlaylist();
       return;
     }
     if (action === "root") {
@@ -1774,7 +1771,7 @@ export async function bootPlaylet({ baseUrl, version }) {
   state.service = null;
   state.serviceName = "";
   const restored = loadPrefsFromStorage();
-  state.playlist = restored?.playlist || [];
+  state.playlist = [];
   state.stars = restored?.stars || {};
   state.playMode = restored?.playMode || MODE_LOOP_ALL;
   state.listTab = "playlist";
