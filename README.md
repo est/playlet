@@ -41,6 +41,7 @@ For v1.2
 - Copy media URL from library rows and playlist rows (`⧉`)
 - Auto-detect `rootDesc.xml`, with hidden advanced URL override
 - Scroll isolation for panel internals (better trackpad behavior on macOS)
+- Native `<audio controls>` player for reliable seek/progress behavior
 - Debug hooks:
   - `window.__playletDebug.getState()`
   - `window.__playletDebug.getLastRequest()`

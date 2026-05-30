@@ -323,6 +323,8 @@ class HtmlMediaAdapter extends BaseMediaAdapter {
     this.audio = new Audio();
     this.audio.preload = "metadata";
     this.audio.crossOrigin = "anonymous";
+    this.audio.controls = true;
+    this.audio.playsInline = true;
 
     this.features = {
       pip: typeof document.pictureInPictureEnabled === "boolean",
@@ -334,7 +336,7 @@ class HtmlMediaAdapter extends BaseMediaAdapter {
     };
 
     this.boundEmit = this.emitState.bind(this);
-    ["timeupdate", "durationchange", "play", "pause", "ended", "volumechange", "loadedmetadata", "error"].forEach((evt) => {
+    ["play", "pause", "ended", "volumechange", "loadedmetadata", "error"].forEach((evt) => {
       this.audio.addEventListener(evt, this.boundEmit);
     });
   }
@@ -385,10 +387,14 @@ class HtmlMediaAdapter extends BaseMediaAdapter {
     };
   }
 
+  getElement() {
+    return this.audio;
+  }
+
   destroy() {
     this.audio.pause();
     this.audio.src = "";
-    ["timeupdate", "durationchange", "play", "pause", "ended", "volumechange", "loadedmetadata", "error"].forEach((evt) => {
+    ["play", "pause", "ended", "volumechange", "loadedmetadata", "error"].forEach((evt) => {
       this.audio.removeEventListener(evt, this.boundEmit);
     });
   }
@@ -593,6 +599,10 @@ function createStyles() {
 #${PLAYLET_ROOT_ID} .playlet-vol-range {
   width: 120px;
 }
+#${PLAYLET_ROOT_ID} .playlet-native-audio audio {
+  width: 100%;
+  margin-top: 8px;
+}
 #${PLAYLET_ROOT_ID} .playlet-status {
   margin-top: 6px;
   font-size: 10px;
@@ -758,8 +768,6 @@ function createUi(root, mediaAdapter) {
     tree: 0,
     playlist: 0,
   };
-  let lastTreeSignature = "";
-  let lastPlaylistSignature = "";
 
   function renderTree() {
     if (!state.service) {
@@ -835,23 +843,11 @@ function createUi(root, mediaAdapter) {
   function render() {
     const status = mediaAdapter.getStatus();
     const now = state.nowPlaying;
-    const duration = Number.isFinite(status.duration) && status.duration > 0 ? status.duration : 0;
-    const progressMax = duration || 1;
-    const progressValue = duration ? Math.max(0, Math.min(status.currentTime || 0, duration)) : 0;
-
-    const nextTreeSignature = treeFlatRows()
-      .map(({ node }) => `${node.id}:${node.expanded ? 1 : 0}:${node.loading ? 1 : 0}`)
-      .join("|");
-    const nextPlaylistSignature = state.playlist.map((x) => x.id).join("|");
 
     const prevTree = root.querySelector(".playlet-tree");
     const prevPlaylist = root.querySelector(".playlet-playlist");
-    if (prevTree && nextTreeSignature !== lastTreeSignature) {
-      scrollState.tree = prevTree.scrollTop;
-    }
-    if (prevPlaylist && nextPlaylistSignature !== lastPlaylistSignature) {
-      scrollState.playlist = prevPlaylist.scrollTop;
-    }
+    if (prevTree) scrollState.tree = prevTree.scrollTop;
+    if (prevPlaylist) scrollState.playlist = prevPlaylist.scrollTop;
 
     root.innerHTML = `
 <div class="playlet-card">
@@ -892,11 +888,8 @@ function createUi(root, mediaAdapter) {
     <div class="playlet-controls">
       <button class="playlet-btn" data-action="play-toggle" ${now ? "" : "disabled"}>${status.paused ? "Play" : "Pause"}</button>
       <button class="playlet-btn" data-kind="ghost" data-action="next" ${state.playlist.length ? "" : "disabled"}>Next</button>
-      <span>${formatSeconds(status.currentTime)} / ${formatSeconds(status.duration)}</span>
-      <span>Vol</span>
-      <input class="playlet-vol-range" type="range" min="0" max="1" step="0.01" value="${Number.isFinite(status.volume) ? status.volume : 1}" data-action="volume" />
     </div>
-    <input class="playlet-range" type="range" min="0" max="${progressMax}" step="0.1" value="${progressValue}" data-action="seek" ${duration ? "" : "disabled"} />
+    <div class="playlet-native-audio" data-role="native-audio"></div>
     <div class="playlet-status">${escapeHtml(featureSummary(status.features))}</div>
   </div>
 
@@ -910,9 +903,13 @@ function createUi(root, mediaAdapter) {
     const playlist = root.querySelector(".playlet-playlist");
     if (tree) tree.scrollTop = scrollState.tree;
     if (playlist) playlist.scrollTop = scrollState.playlist;
-
-    lastTreeSignature = nextTreeSignature;
-    lastPlaylistSignature = nextPlaylistSignature;
+    const audioHost = root.querySelector('[data-role="native-audio"]');
+    if (audioHost && typeof mediaAdapter.getElement === "function") {
+      const nativeAudioEl = mediaAdapter.getElement();
+      if (nativeAudioEl && nativeAudioEl.parentNode !== audioHost) {
+        audioHost.appendChild(nativeAudioEl);
+      }
+    }
   }
 
   function attachScrollIsolation(rootEl) {
@@ -1165,17 +1162,6 @@ function createUi(root, mediaAdapter) {
 
     root.querySelector('[data-action="next"]')?.addEventListener("click", async () => {
       await playNextInPlaylist();
-    });
-
-    root.querySelector('[data-action="volume"]')?.addEventListener("input", (evt) => {
-      mediaAdapter.setVolume(Number(evt.target.value));
-    });
-
-    root.querySelector('[data-action="seek"]')?.addEventListener("input", (evt) => {
-      const value = Number(evt.target.value);
-      if (Number.isFinite(value)) {
-        mediaAdapter.seek(value);
-      }
     });
 
     root.querySelectorAll('[data-action="toggle"][data-node-id]').forEach((btn) => {
