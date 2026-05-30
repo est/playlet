@@ -228,64 +228,73 @@ function playletDebugHtml(host) {
 <body>
   <div class="toolbar">
     <span class="title">Playlet Local Proxy Debug</span>
-    <label>Desc URL</label>
+    <label>Desc</label>
     <input id="desc" size="52" value="${descHint}" />
-    <button id="inject">Inject Bookmarklet (import)</button>
-    <span class="hint">inject <code>import('/playlet/loader.js')</code> into iframe</span>
+    <button id="inject">Inject</button>
+    <button id="fix-audio">Fix Audio CORS</button>
+    <span class="hint" id="fix-status">audio fix: off</span>
   </div>
   <iframe id="frame" src="${iframeSrc}"></iframe>
   <script>
     const frame = document.getElementById('frame');
     const input = document.getElementById('desc');
+    const fixStatus = document.getElementById('fix-status');
 
-    function installAudioProxyFix(w) {
+    function bindAudioFixManually() {
       try {
-        if (!w || w.__playletDebugAudioFixInstalled) return;
-        const AudioProto = w.Audio && w.Audio.prototype;
-        if (!AudioProto) return;
-        const desc = Object.getOwnPropertyDescriptor(AudioProto, 'src');
-        if (!desc || typeof desc.set !== 'function' || typeof desc.get !== 'function') return;
-        const retryKey = '__playletProxyRetrySrc';
-        const originalSet = desc.set;
-        const originalGet = desc.get;
-
-        Object.defineProperty(AudioProto, 'src', {
-          configurable: true,
-          enumerable: desc.enumerable,
-          get() {
-            return originalGet.call(this);
-          },
-          set(value) {
-            const onError = () => {
-              try {
-                const current = this.currentSrc || originalGet.call(this) || value;
-                if (!current || this[retryKey] === current) return;
-                const u = new URL(current, w.location.href);
-                if (u.origin === w.location.origin) return;
-                if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
-                this[retryKey] = current;
-                const fixed = w.location.origin + u.pathname + u.search + u.hash;
-                originalSet.call(this, fixed);
-                this.play().catch(() => {});
-              } catch {}
+        const w = frame.contentWindow;
+        if (!w) {
+          fixStatus.textContent = 'audio fix: failed';
+          return;
+        }
+        w.eval(`
+          (() => {
+            if (window.__playletDebugAudioFixInstalled) return true;
+            const RETRY_KEY = '__playletProxyRetrySrc';
+            const bind = (audio) => {
+              if (!audio || audio.__playletAudioFixBound) return;
+              audio.__playletAudioFixBound = true;
+              audio.onerror = (e) => {
+                const el = e && e.target;
+                if (!el) return;
+                const current = el.currentSrc || el.src || '';
+                if (!current || el[RETRY_KEY] === current) return;
+                try {
+                  const u = new URL(current, location.href);
+                  if (u.origin === location.origin) return;
+                  if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+                  el[RETRY_KEY] = current;
+                  const fixed = location.origin + u.pathname + u.search + u.hash;
+                  console.log('[playlet-debug] audio fallback', current, '->', fixed);
+                  el.src = fixed;
+                  el.play().catch(() => {});
+                } catch {}
+              };
             };
-            this.addEventListener('error', onError, { once: true });
-            return originalSet.call(this, value);
-          }
-        });
-
-        w.__playletDebugAudioFixInstalled = true;
-      } catch {}
+            bind(document.querySelector('audio'));
+            window.__playletDebugAudioFixTimer = window.__playletDebugAudioFixTimer || setInterval(() => {
+              bind(document.querySelector('audio'));
+            }, 1000);
+            window.__playletDebugAudioFixInstalled = true;
+            return true;
+          })();
+        `);
+        fixStatus.textContent = 'audio fix: on';
+      } catch {
+        fixStatus.textContent = 'audio fix: failed';
+      }
     }
+
+    document.getElementById('fix-audio').addEventListener('click', bindAudioFixManually);
 
     document.getElementById('inject').addEventListener('click', async () => {
       const desc = input.value.trim();
       const w = frame.contentWindow;
       if (!w) return;
-      installAudioProxyFix(w);
       w.history.replaceState({}, '', '?playlet_desc=' + encodeURIComponent(desc));
       try {
         await w.eval('import("${PLAYLET_PREFIX}/loader.js")');
+        fixStatus.textContent = 'audio fix: off';
       } catch (e) {
         alert('inject failed: ' + e.message);
       }
