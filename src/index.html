@@ -62,7 +62,7 @@
     }
 
     .row {
-      margin-top: 18px;
+      margin: 18px 0 18px 0;
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
@@ -86,10 +86,15 @@
       background: var(--accent);
       border: 0;
       border-radius: 9px;
-      padding: 10px 13px;
+      padding: 7px 10px;
+      font-size: 12px;
       font-weight: 650;
       text-decoration: none;
       cursor: pointer;
+    }
+    button:active,
+    a:active {
+      transform: scale(0.97);
     }
 
     .ghost {
@@ -99,7 +104,7 @@
     }
 
     ol {
-      margin: 18px 0 0;
+      margin: 0 0;
       padding-left: 20px;
       color: #d6d6df;
       line-height: 1.55;
@@ -123,30 +128,34 @@
   <main>
     <h1>Playlet</h1>
     <p>
-      No native app. No SSDP hacks. Inject a bookmarklet into your
-      DLNA page and stream instantly.
+      Play songs on any DLNA server from the browser, no app installs.
     </p>
 
     <div class="row">
       <code id="bookmarklet">javascript:import("https://est.github.io/playlet/loader.js")</code>
-      <button id="btnCopy">Copy Bookmarklet</button>
-      <a class="ghost" href="./loader.js">Open loader.js</a>
+      <button id="btnCopy">Copy</button>
     </div>
 
     <ol>
-      <li>Replace host in bookmarklet with your pages URL.</li>
+      <li>Copy the code above (It's called a <i>bookmarklet</i>)</li>
+      <li>Save it as URL to your browser bookmark. For Chrome:</li>
+        <ol>
+          <li>Hit the ☆ on the right side of address bar.</li>
+          <li>Click "More" on the popup</li>
+          <li>Paste the code as the URL</li>
+          <li>Give it another name if you like</li>
+        </ol>
       <li>
-        Open NAS DLNA page (same origin as
-        <code>rootDesc.xml</code>).
+        Open DLNA page (usually http://NAS-IP:8200/).
       </li>
       <li>
-        Click bookmark. Browse tree with +/-, queue tracks, play.
+        Click the bookmark. Browse tree with +/-, queue tracks, play.
       </li>
     </ol>
 
     <footer>
       <span>Version: __PLAYLET_VERSION__</span>
-      <span><a class="ghost" href="https://github.com/est/playlet" target="_blank" rel="noreferrer">Repo</a></span>
+      <span><a class="ghost" href="https://github.com/est/playlet" target="_blank" rel="noreferrer">Github</a></span>
       <span>Debug: <code>window.__playletDebug</code></span>
     </footer>
   </main>
