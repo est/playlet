@@ -2,6 +2,11 @@ const PLAYLET_ROOT_ID = "playlet-root";
 const PLAYLET_STYLE_ID = "playlet-style";
 const PLAYLET_RUNTIME_KEY = "__playletRuntime";
 const CONTENT_DIRECTORY_SERVICE = "urn:schemas-upnp-org:service:ContentDirectory:1";
+const PLAYLET_STORAGE_KEY = "__playletPrefsV1";
+const MODE_LOOP_ALL = "loop_all";
+const MODE_LOOP_ONE = "loop_one";
+const MODE_SHUFFLE = "shuffle";
+const PLAY_MODES = [MODE_LOOP_ALL, MODE_LOOP_ONE, MODE_SHUFFLE];
 
 const state = {
   initialized: false,
@@ -15,6 +20,8 @@ const state = {
   treeNodes: {},
   treeTick: 0,
   playlist: [],
+  stars: {},
+  playMode: MODE_LOOP_ALL,
   nowPlaying: null,
   nowPlayingPlaylistId: "",
   toast: "",
@@ -31,6 +38,52 @@ function publishState() {
 function setState(next) {
   Object.assign(state, next);
   publishState();
+}
+
+function safeLocalStorageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore storage quota/permission failures
+  }
+}
+
+function savePrefsToStorage() {
+  const payload = {
+    playMode: state.playMode,
+    playlist: state.playlist,
+    stars: state.stars,
+  };
+  safeLocalStorageSet(PLAYLET_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function loadPrefsFromStorage() {
+  const raw = safeLocalStorageGet(PLAYLET_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      playMode: PLAY_MODES.includes(parsed?.playMode) ? parsed.playMode : MODE_LOOP_ALL,
+      playlist: Array.isArray(parsed?.playlist) ? parsed.playlist : [],
+      stars: parsed?.stars && typeof parsed.stars === "object" ? parsed.stars : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+function modeLabel(mode) {
+  if (mode === MODE_LOOP_ONE) return "1";
+  if (mode === MODE_SHUFFLE) return "⤮";
+  return "∞";
 }
 
 function bumpTree() {
@@ -470,6 +523,13 @@ function createStyles() {
   color: #fff;
   cursor: pointer;
 }
+#${PLAYLET_ROOT_ID} .playlet-row.dragging {
+  opacity: 0.45;
+}
+#${PLAYLET_ROOT_ID} .playlet-row.drop-target {
+  outline: 2px dashed #7ca4ec;
+  outline-offset: 1px;
+}
 #${PLAYLET_ROOT_ID} .playlet-btn {
   padding: 6px 9px;
 }
@@ -789,12 +849,15 @@ function createUi(root, mediaAdapter) {
     <div class="playlet-tree playlet-scroll-zone" data-role="tree" data-scroll-zone="tree"></div>
     <div class="playlet-section-title" data-role="playlist-title">Playlist (0)</div>
     <div class="playlet-playlist playlet-scroll-zone" data-role="playlist" data-scroll-zone="playlist"></div>
+    <div class="playlet-section-title" data-role="favorites-title">Favorites (0)</div>
+    <div class="playlet-playlist playlet-scroll-zone" data-role="favorites" data-scroll-zone="favorites"></div>
   </div>
   <div class="playlet-foot">
     <div class="playlet-now" data-role="now"></div>
     <div class="playlet-controls">
       <button class="playlet-btn" data-action="play-toggle">Play</button>
       <button class="playlet-btn" data-kind="ghost" data-action="next">Next</button>
+      <button class="playlet-btn" data-kind="ghost" data-action="cycle-mode" title="play mode"></button>
     </div>
     <div class="playlet-native-audio" data-role="native-audio"></div>
     <div class="playlet-status" data-role="status"></div>
@@ -813,6 +876,8 @@ function createUi(root, mediaAdapter) {
     tree: root.querySelector('[data-role="tree"]'),
     playlistTitle: root.querySelector('[data-role="playlist-title"]'),
     playlist: root.querySelector('[data-role="playlist"]'),
+    favoritesTitle: root.querySelector('[data-role="favorites-title"]'),
+    favorites: root.querySelector('[data-role="favorites"]'),
     now: root.querySelector('[data-role="now"]'),
     playToggleBtn: root.querySelector('[data-action="play-toggle"]'),
     nextBtn: root.querySelector('[data-action="next"]'),
@@ -842,6 +907,9 @@ function createUi(root, mediaAdapter) {
   }
   attachScrollIsolation(refs.tree);
   attachScrollIsolation(refs.playlist);
+  attachScrollIsolation(refs.favorites);
+
+  let playlistDragId = "";
 
   function renderTreeRows() {
     const frag = document.createDocumentFragment();
@@ -913,6 +981,14 @@ function createUi(root, mediaAdapter) {
         add.textContent = "+";
         add.disabled = !node.playable;
 
+        const star = document.createElement("button");
+        star.className = "playlet-icon-btn";
+        star.dataset.kind = "ghost";
+        star.dataset.action = "toggle-star";
+        star.dataset.nodeId = node.id;
+        star.textContent = state.stars[node.id] ? "★" : "☆";
+        star.disabled = !node.playable;
+
         const play = document.createElement("button");
         play.className = "playlet-icon-btn";
         play.dataset.action = "play-item";
@@ -921,6 +997,7 @@ function createUi(root, mediaAdapter) {
         play.disabled = !node.playable;
 
         actions.appendChild(copy);
+        actions.appendChild(star);
         actions.appendChild(add);
         actions.appendChild(play);
       }
@@ -931,6 +1008,69 @@ function createUi(root, mediaAdapter) {
       frag.appendChild(row);
     }
     return frag;
+  }
+
+  function buildTrackRow(item, idx, context) {
+    const row = document.createElement("div");
+    row.className = "playlet-row";
+    if (item.id === state.nowPlayingPlaylistId) row.dataset.now = "1";
+    if (context === "playlist") {
+      row.draggable = true;
+      row.dataset.dragId = item.id;
+    }
+
+    const index = document.createElement("span");
+    index.className = "playlet-item-indent";
+    index.textContent = String(idx + 1);
+
+    const main = document.createElement("div");
+    main.className = "playlet-row-main";
+    const title = document.createElement("div");
+    title.className = "playlet-row-title";
+    title.textContent = item.title;
+    const sub = document.createElement("div");
+    sub.className = "playlet-row-sub";
+    sub.textContent = playlistRowSub(item);
+    main.appendChild(title);
+    main.appendChild(sub);
+
+    const actions = document.createElement("div");
+    actions.className = "playlet-row-actions";
+
+    const copy = document.createElement("button");
+    copy.className = "playlet-icon-btn";
+    copy.dataset.kind = "ghost";
+    copy.dataset.action = context === "playlist" ? "playlist-copy" : "favorite-copy";
+    copy.dataset.playlistId = item.id;
+    copy.textContent = "⧉";
+
+    const play = document.createElement("button");
+    play.className = "playlet-icon-btn";
+    play.dataset.action = context === "playlist" ? "playlist-play" : "favorite-play";
+    play.dataset.playlistId = item.id;
+    play.textContent = "▶";
+
+    const star = document.createElement("button");
+    star.className = "playlet-icon-btn";
+    star.dataset.kind = "ghost";
+    star.dataset.action = "toggle-star-playlist";
+    star.dataset.nodeId = item.sourceNodeId || item.id;
+    star.textContent = state.stars[item.sourceNodeId || item.id] ? "★" : "☆";
+
+    actions.append(copy, star, play);
+
+    if (context === "playlist") {
+      const remove = document.createElement("button");
+      remove.className = "playlet-icon-btn";
+      remove.dataset.kind = "ghost";
+      remove.dataset.action = "playlist-remove";
+      remove.dataset.playlistId = item.id;
+      remove.textContent = "-";
+      actions.insertBefore(remove, play);
+    }
+
+    row.append(index, main, actions);
+    return row;
   }
 
   function renderPlaylistRows() {
@@ -944,50 +1084,25 @@ function createUi(root, mediaAdapter) {
     }
 
     state.playlist.forEach((item, idx) => {
-      const row = document.createElement("div");
-      row.className = "playlet-row";
-      if (item.id === state.nowPlayingPlaylistId) row.dataset.now = "1";
-
-      const index = document.createElement("span");
-      index.className = "playlet-item-indent";
-      index.textContent = String(idx + 1);
-
-      const main = document.createElement("div");
-      main.className = "playlet-row-main";
-      const title = document.createElement("div");
-      title.className = "playlet-row-title";
-      title.textContent = item.title;
-      const sub = document.createElement("div");
-      sub.className = "playlet-row-sub";
-      sub.textContent = playlistRowSub(item);
-      main.appendChild(title);
-      main.appendChild(sub);
-
-      const actions = document.createElement("div");
-      actions.className = "playlet-row-actions";
-      const copy = document.createElement("button");
-      copy.className = "playlet-icon-btn";
-      copy.dataset.kind = "ghost";
-      copy.dataset.action = "playlist-copy";
-      copy.dataset.playlistId = item.id;
-      copy.textContent = "⧉";
-      const remove = document.createElement("button");
-      remove.className = "playlet-icon-btn";
-      remove.dataset.kind = "ghost";
-      remove.dataset.action = "playlist-remove";
-      remove.dataset.playlistId = item.id;
-      remove.textContent = "-";
-      const play = document.createElement("button");
-      play.className = "playlet-icon-btn";
-      play.dataset.action = "playlist-play";
-      play.dataset.playlistId = item.id;
-      play.textContent = "▶";
-      actions.append(copy, remove, play);
-
-      row.append(index, main, actions);
-      frag.appendChild(row);
+      frag.appendChild(buildTrackRow(item, idx, "playlist"));
     });
 
+    return frag;
+  }
+
+  function renderFavoritesRows() {
+    const frag = document.createDocumentFragment();
+    const favorites = state.playlist.filter((item) => state.stars[item.sourceNodeId || item.id]);
+    if (!favorites.length) {
+      const empty = document.createElement("div");
+      empty.className = "playlet-empty";
+      empty.textContent = "No favorites yet. Use ☆/★.";
+      frag.appendChild(empty);
+      return frag;
+    }
+    favorites.forEach((item, idx) => {
+      frag.appendChild(buildTrackRow(item, idx, "favorite"));
+    });
     return frag;
   }
 
@@ -1008,6 +1123,7 @@ function createUi(root, mediaAdapter) {
     }
 
     refs.playlistTitle.textContent = `Playlist (${state.playlist.length})`;
+    refs.favoritesTitle.textContent = `Favorites (${state.playlist.filter((x) => state.stars[x.sourceNodeId || x.id]).length})`;
   }
 
   function renderPlayerOnly() {
@@ -1016,6 +1132,8 @@ function createUi(root, mediaAdapter) {
     refs.playToggleBtn.disabled = !state.nowPlaying;
     refs.playToggleBtn.textContent = status.paused ? "Play" : "Pause";
     refs.nextBtn.disabled = !state.playlist.length;
+    const modeBtn = root.querySelector('[data-action="cycle-mode"]');
+    if (modeBtn) modeBtn.textContent = modeLabel(state.playMode);
     refs.status.textContent = featureSummary(status.features);
 
     if (refs.nativeAudioHost && typeof mediaAdapter.getElement === "function") {
@@ -1048,10 +1166,17 @@ function createUi(root, mediaAdapter) {
     refs.playlist.scrollTop = top;
   }
 
+  function renderFavoritesSection() {
+    const top = refs.favorites.scrollTop;
+    refs.favorites.replaceChildren(renderFavoritesRows());
+    refs.favorites.scrollTop = top;
+  }
+
   function render() {
     renderHeaderAndStatus();
     renderTreeSection();
     renderPlaylistSection();
+    renderFavoritesSection();
     renderPlayerOnly();
     renderToast();
   }
@@ -1102,11 +1227,26 @@ function createUi(root, mediaAdapter) {
   async function playNextInPlaylist() {
     if (!state.playlist.length) return;
 
+    if (state.playMode === MODE_LOOP_ONE && state.nowPlayingPlaylistId) {
+      await playPlaylistById(state.nowPlayingPlaylistId);
+      return;
+    }
+
     let nextIdx = 0;
     if (state.nowPlayingPlaylistId) {
       const currentIdx = state.playlist.findIndex((x) => x.id === state.nowPlayingPlaylistId);
       if (currentIdx >= 0) {
-        nextIdx = (currentIdx + 1) % state.playlist.length;
+        if (state.playMode === MODE_SHUFFLE) {
+          if (state.playlist.length === 1) {
+            nextIdx = currentIdx;
+          } else {
+            do {
+              nextIdx = Math.floor(Math.random() * state.playlist.length);
+            } while (nextIdx === currentIdx);
+          }
+        } else {
+          nextIdx = (currentIdx + 1) % state.playlist.length;
+        }
       }
     }
 
@@ -1127,6 +1267,7 @@ function createUi(root, mediaAdapter) {
     };
 
     state.playlist.push(item);
+    savePrefsToStorage();
     setState({ playlist: state.playlist, error: "" });
     setToast("Added to playlist");
   }
@@ -1140,7 +1281,36 @@ function createUi(root, mediaAdapter) {
     if (removed.id === state.nowPlayingPlaylistId) {
       patch.nowPlayingPlaylistId = "";
     }
+    savePrefsToStorage();
     setState(patch);
+  }
+
+  function toggleStar(nodeId) {
+    if (!nodeId) return;
+    if (state.stars[nodeId]) delete state.stars[nodeId];
+    else state.stars[nodeId] = true;
+    savePrefsToStorage();
+    setState({ stars: state.stars });
+  }
+
+  function reorderPlaylist(dragId, dropId) {
+    if (!dragId || !dropId || dragId === dropId) return;
+    const from = state.playlist.findIndex((x) => x.id === dragId);
+    const to = state.playlist.findIndex((x) => x.id === dropId);
+    if (from < 0 || to < 0) return;
+    const [moved] = state.playlist.splice(from, 1);
+    state.playlist.splice(to, 0, moved);
+    savePrefsToStorage();
+    setState({ playlist: state.playlist });
+  }
+
+  function cycleMode() {
+    const idx = PLAY_MODES.indexOf(state.playMode);
+    const next = PLAY_MODES[(idx + 1) % PLAY_MODES.length];
+    state.playMode = next;
+    savePrefsToStorage();
+    setState({ playMode: next });
+    setToast(`Mode: ${next}`);
   }
 
   async function loadChildren(nodeId, force = false) {
@@ -1284,8 +1454,20 @@ function createUi(root, mediaAdapter) {
       await playNextInPlaylist();
       return;
     }
+    if (action === "cycle-mode") {
+      cycleMode();
+      return;
+    }
     if (action === "toggle") {
       await toggleNode(target.dataset.nodeId || "");
+      return;
+    }
+    if (action === "toggle-star") {
+      toggleStar(target.dataset.nodeId || "");
+      return;
+    }
+    if (action === "toggle-star-playlist") {
+      toggleStar(target.dataset.nodeId || "");
       return;
     }
     if (action === "play-item") {
@@ -1325,10 +1507,73 @@ function createUi(root, mediaAdapter) {
         setState({ error: `Copy failed: ${err.message}` });
       }
     }
+    if (action === "favorite-copy") {
+      const item = findPlaylistItem(target.dataset.playlistId || "");
+      if (!item?.url) return;
+      try {
+        await copyText(item.url);
+        setToast("Favorite URL copied");
+      } catch (err) {
+        setState({ error: `Copy failed: ${err.message}` });
+      }
+      return;
+    }
+    if (action === "favorite-play") {
+      await playPlaylistById(target.dataset.playlistId || "");
+    }
+  });
+
+  refs.playlist.addEventListener("dragstart", (evt) => {
+    const row = evt.target.closest("[data-drag-id]");
+    if (!row) return;
+    playlistDragId = row.dataset.dragId || "";
+    row.classList.add("dragging");
+    evt.dataTransfer.effectAllowed = "move";
+    evt.dataTransfer.setData("text/plain", playlistDragId);
+  });
+
+  refs.playlist.addEventListener("dragover", (evt) => {
+    const row = evt.target.closest("[data-drag-id]");
+    if (!row) return;
+    evt.preventDefault();
+    evt.dataTransfer.dropEffect = "move";
+    refs.playlist.querySelectorAll(".drop-target").forEach((el) => el.classList.remove("drop-target"));
+    row.classList.add("drop-target");
+  });
+
+  refs.playlist.addEventListener("dragleave", (evt) => {
+    const row = evt.target.closest("[data-drag-id]");
+    if (!row) return;
+    row.classList.remove("drop-target");
+  });
+
+  refs.playlist.addEventListener("drop", (evt) => {
+    const row = evt.target.closest("[data-drag-id]");
+    if (!row) return;
+    evt.preventDefault();
+    row.classList.remove("drop-target");
+    const dropId = row.dataset.dragId || "";
+    const dragId = playlistDragId || evt.dataTransfer.getData("text/plain");
+    reorderPlaylist(dragId, dropId);
+    playlistDragId = "";
+  });
+
+  refs.playlist.addEventListener("dragend", () => {
+    refs.playlist.querySelectorAll(".dragging,.drop-target").forEach((el) => {
+      el.classList.remove("dragging");
+      el.classList.remove("drop-target");
+    });
+    playlistDragId = "";
   });
 
   listeners.add(render);
   mediaAdapter.onState = () => renderPlayerOnly();
+  const nativeAudioEl = mediaAdapter.getElement?.();
+  nativeAudioEl?.addEventListener("ended", () => {
+    playNextInPlaylist().catch((err) => {
+      setState({ error: `Next track failed: ${err.message}` });
+    });
+  });
 
   return {
     render,
@@ -1387,7 +1632,10 @@ export async function bootPlaylet({ baseUrl, version }) {
   state.showAdvanced = false;
   state.service = null;
   state.serviceName = "";
-  state.playlist = [];
+  const restored = loadPrefsFromStorage();
+  state.playlist = restored?.playlist || [];
+  state.stars = restored?.stars || {};
+  state.playMode = restored?.playMode || MODE_LOOP_ALL;
   state.nowPlaying = null;
   state.nowPlayingPlaylistId = "";
   state.toast = "";

@@ -38,7 +38,10 @@ For v1.2
 
 - Tree browser with `+/-` expand/collapse (lazy-loaded by node)
 - Session playlist: add, remove, play from queue
+- Playlist supports drag-drop reorder
 - Copy media URL from library rows and playlist rows (`⧉`)
+- Favorites: single-track star (`☆/★`) with localStorage persistence
+- Playback modes: all-loop (`∞`), single-loop (`1`), shuffle (`⤮`)
 - Auto-detect `rootDesc.xml`, with hidden advanced URL override
 - Scroll isolation for panel internals (better trackpad behavior on macOS)
 - Native `<audio controls>` player for reliable seek/progress behavior
