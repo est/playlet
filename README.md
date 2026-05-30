@@ -37,11 +37,16 @@ No ads, telemetry. Works offline once loaded.
 For v1.2
 
 - Tree browser with `+/-` expand/collapse (lazy-loaded by node)
+- `Library` tabs: `Tree | Search`
+- Search modes:
+  - `DLNA`: use `ContentDirectory:Search` when server supports it
+  - `Local: Tree`: search only loaded tree nodes
+  - `Local: Full`: crawl full library locally, then search
 - Session playlist: add, remove, play from queue
 - Playlist supports drag-drop reorder
 - Copy media URL from library rows and playlist rows (`⧉`)
 - Favorites: single-track star (`☆/★`) with localStorage persistence
-- Playback modes: all-loop (`∞`), single-loop (`1`), shuffle (`⤮`)
+- Playback modes: all-loop (`∞`), single-loop (`1`)
 - Auto-detect `rootDesc.xml`, with hidden advanced URL override
 - Scroll isolation for panel internals (better trackpad behavior on macOS)
 - Native `<audio controls>` player for reliable seek/progress behavior

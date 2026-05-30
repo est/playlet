@@ -6,6 +6,10 @@ const PLAYLET_STORAGE_KEY = "__playletPrefsV1";
 const MODE_LOOP_ALL = "loop_all";
 const MODE_LOOP_ONE = "loop_one";
 const PLAY_MODES = [MODE_LOOP_ALL, MODE_LOOP_ONE];
+const SEARCH_MODE_DLNA = "dlna";
+const SEARCH_MODE_LOCAL_TREE = "local_tree";
+const SEARCH_MODE_LOCAL_FULL = "local_full";
+const SEARCH_MODES = [SEARCH_MODE_DLNA, SEARCH_MODE_LOCAL_TREE, SEARCH_MODE_LOCAL_FULL];
 
 const state = {
   initialized: false,
@@ -18,6 +22,13 @@ const state = {
   serviceName: "",
   treeNodes: {},
   treeTick: 0,
+  libraryTab: "tree",
+  searchMode: SEARCH_MODE_DLNA,
+  searchQuery: "",
+  searchBusy: false,
+  searchStatus: "",
+  searchResults: [],
+  searchResultNodes: {},
   playlist: [],
   stars: {},
   playMode: MODE_LOOP_ALL,
@@ -251,6 +262,7 @@ class DlnaClient {
     this.serviceName = "";
     this.lastRequest = null;
     this.lastResponse = null;
+    this.searchAvailable = true;
   }
 
   async init() {
@@ -326,6 +338,70 @@ class DlnaClient {
     const fault = firstElementByLocalName(doc, "Fault");
     if (fault) {
       throw new Error(`SOAP Fault: ${fault.textContent?.trim() || "Unknown fault"}`);
+    }
+
+    const resultNode = firstElementByLocalName(doc, "Result");
+    if (!resultNode) return [];
+
+    return parseDidlEntries(resultNode.textContent || "", this.controlUrl);
+  }
+
+  async search(containerId = "0", searchCriteria = "", start = 0, count = 200, sortCriteria = "") {
+    if (this.searchAvailable === false) {
+      const err = new Error("DLNA Search action not available");
+      err.code = "SEARCH_UNAVAILABLE";
+      throw err;
+    }
+
+    const action = "Search";
+    const body = `<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:Search xmlns:u="${this.serviceType}">
+      <ContainerID>${escapeHtml(containerId)}</ContainerID>
+      <SearchCriteria>${escapeHtml(searchCriteria)}</SearchCriteria>
+      <Filter>*</Filter>
+      <StartingIndex>${start}</StartingIndex>
+      <RequestedCount>${count}</RequestedCount>
+      <SortCriteria>${escapeHtml(sortCriteria)}</SortCriteria>
+    </u:Search>
+  </s:Body>
+</s:Envelope>`;
+
+    this.lastRequest = { url: this.controlUrl, action, containerId, searchCriteria, body };
+
+    const res = await fetch(this.controlUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": 'text/xml; charset="utf-8"',
+        SOAPAction: `"${this.serviceType}#${action}"`,
+      },
+      body,
+    });
+
+    const xml = await res.text();
+    this.lastResponse = { status: res.status, ok: res.ok, xml };
+
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const parseError = doc.querySelector("parsererror");
+    if (parseError) {
+      throw new Error(`SOAP parse failed: ${parseError.textContent?.trim() || "Unknown parser error"}`);
+    }
+
+    const fault = firstElementByLocalName(doc, "Fault");
+    if (fault) {
+      const faultText = fault.textContent?.trim() || "Unknown fault";
+      if (faultText.includes("401") || faultText.toLowerCase().includes("invalid action")) {
+        this.searchAvailable = false;
+        const err = new Error("DLNA Search action not available");
+        err.code = "SEARCH_UNAVAILABLE";
+        throw err;
+      }
+      throw new Error(`SOAP Fault: ${faultText}`);
+    }
+
+    if (!res.ok) {
+      throw new Error(`Search failed: ${res.status} ${res.statusText}`);
     }
 
     const resultNode = firstElementByLocalName(doc, "Result");
@@ -572,9 +648,46 @@ function createStyles() {
 #${PLAYLET_ROOT_ID} .playlet-playlist {
   padding: 7px;
 }
+#${PLAYLET_ROOT_ID} .playlet-tree-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
 #${PLAYLET_ROOT_ID} .playlet-tree {
   flex: 1;
   min-height: 0;
+}
+#${PLAYLET_ROOT_ID} .playlet-library-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#${PLAYLET_ROOT_ID} .playlet-search-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#${PLAYLET_ROOT_ID} .playlet-search-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+#${PLAYLET_ROOT_ID} .playlet-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 7px;
+  border: 1px solid #ced7e6;
+  background: #fff;
+}
+#${PLAYLET_ROOT_ID} .playlet-search-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: #5d6a82;
+  font-size: 10px;
 }
 #${PLAYLET_ROOT_ID} .playlet-playlist {
   height: 34%;
@@ -845,6 +958,28 @@ function decodeNodeId(id) {
   return decodeURIComponent(id);
 }
 
+function searchModeLabel(mode) {
+  if (mode === SEARCH_MODE_LOCAL_TREE) return "Local: Tree";
+  if (mode === SEARCH_MODE_LOCAL_FULL) return "Local: Full";
+  return "DLNA";
+}
+
+function escapeSearchValue(input) {
+  return String(input || "").replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+function buildDlnaSearchCriteria(keyword) {
+  const q = escapeSearchValue(keyword);
+  return `upnp:class derivedfrom "object.item.audioItem" and (dc:title contains "${q}" or upnp:artist contains "${q}" or upnp:album contains "${q}")`;
+}
+
+function textMatchesKeyword(node, keyword) {
+  const q = String(keyword || "").trim().toLowerCase();
+  if (!q) return false;
+  const fields = [node.title, node.artist, node.album, node.className];
+  return fields.some((x) => String(x || "").toLowerCase().includes(q));
+}
+
 function treeFlatRows() {
   const out = [];
 
@@ -919,8 +1054,31 @@ function createUi(root, mediaAdapter) {
   </div>
   <div class="playlet-error" data-role="error" style="display:none"></div>
   <div class="playlet-main">
-    <div class="playlet-section-title">Library Tree (+/-)</div>
-    <div class="playlet-tree playlet-scroll-zone" data-role="tree" data-scroll-zone="tree"></div>
+    <div class="playlet-section-title">
+      <div class="playlet-tree-head">
+        <span>Library</span>
+        <div class="playlet-tabs">
+          <button class="playlet-tab" data-action="tab-library-tree" data-role="tab-library-tree">Tree</button>
+          <button class="playlet-tab" data-action="tab-library-search" data-role="tab-library-search">Search</button>
+        </div>
+      </div>
+    </div>
+    <div class="playlet-library-panel playlet-scroll-zone" data-role="library-panel" data-scroll-zone="tree">
+      <div class="playlet-tree" data-role="tree"></div>
+      <div class="playlet-tree playlet-search-panel" data-role="search-panel" style="display:none">
+        <div class="playlet-search-bar">
+          <input class="playlet-search-input" data-role="search-input" placeholder="Search title / artist / album" />
+          <button class="playlet-btn" data-kind="ghost" data-action="search-run">Search</button>
+        </div>
+        <div class="playlet-search-meta">
+          <button class="playlet-tab" data-action="search-mode-dlna" data-role="search-mode-dlna">DLNA</button>
+          <button class="playlet-tab" data-action="search-mode-local-tree" data-role="search-mode-local-tree">Local: Tree</button>
+          <button class="playlet-tab" data-action="search-mode-local-full" data-role="search-mode-local-full">Local: Full</button>
+        </div>
+        <div class="playlet-row-sub" data-role="search-status"></div>
+        <div data-role="search-results"></div>
+      </div>
+    </div>
     <div class="playlet-section-title">
       <div class="playlet-tabs">
         <button class="playlet-tab" data-action="tab-playlist" data-role="tab-playlist">Playlist (0)</button>
@@ -959,7 +1117,17 @@ function createUi(root, mediaAdapter) {
     advancedWrap: root.querySelector('[data-role="advanced-wrap"]'),
     descInput: root.querySelector('[data-role="desc-input"]'),
     error: root.querySelector('[data-role="error"]'),
+    tabLibraryTree: root.querySelector('[data-role="tab-library-tree"]'),
+    tabLibrarySearch: root.querySelector('[data-role="tab-library-search"]'),
+    libraryPanel: root.querySelector('[data-role="library-panel"]'),
     tree: root.querySelector('[data-role="tree"]'),
+    searchPanel: root.querySelector('[data-role="search-panel"]'),
+    searchInput: root.querySelector('[data-role="search-input"]'),
+    searchStatus: root.querySelector('[data-role="search-status"]'),
+    searchResults: root.querySelector('[data-role="search-results"]'),
+    searchModeDlna: root.querySelector('[data-role="search-mode-dlna"]'),
+    searchModeLocalTree: root.querySelector('[data-role="search-mode-local-tree"]'),
+    searchModeLocalFull: root.querySelector('[data-role="search-mode-local-full"]'),
     tabPlaylist: root.querySelector('[data-role="tab-playlist"]'),
     tabFavorites: root.querySelector('[data-role="tab-favorites"]'),
     playlistClearBtn: root.querySelector('[data-role="playlist-clear"]'),
@@ -994,10 +1162,11 @@ function createUi(root, mediaAdapter) {
       { passive: false }
     );
   }
-  attachScrollIsolation(refs.tree);
+  attachScrollIsolation(refs.libraryPanel);
   attachScrollIsolation(refs.playlist);
 
   let playlistDragId = "";
+  const fullSearchIndex = { built: false, building: false, items: [] };
 
   function renderTreeRows() {
     const frag = document.createDocumentFragment();
@@ -1193,6 +1362,94 @@ function createUi(root, mediaAdapter) {
     return frag;
   }
 
+  function buildSearchRow(node) {
+    const row = document.createElement("div");
+    row.className = "playlet-row";
+    row.dataset.kind = node.kind;
+    row.dataset.searchNodeId = node.id;
+
+    const left = document.createElement("span");
+    left.className = "playlet-item-indent";
+
+    const main = document.createElement("div");
+    main.className = "playlet-row-main";
+    const title = document.createElement("div");
+    title.className = "playlet-row-title";
+    title.textContent = `${node.kind === "container" ? "📁" : "🎵"} ${node.title}`;
+    const sub = document.createElement("div");
+    sub.className = "playlet-row-sub";
+    sub.textContent =
+      node.kind === "container"
+        ? `${node.childCount || 0} items`
+        : [node.artist, node.album].filter(Boolean).join(" · ") || node.className || "media item";
+    main.append(title, sub);
+
+    const actions = document.createElement("div");
+    actions.className = "playlet-row-actions";
+    actions.style.opacity = "1";
+    actions.style.pointerEvents = "auto";
+
+    if (node.kind === "item") {
+      const copy = document.createElement("button");
+      copy.className = "playlet-icon-btn";
+      copy.dataset.kind = "ghost";
+      copy.dataset.action = "search-copy-url";
+      copy.dataset.searchNodeId = node.id;
+      copy.textContent = "⧉";
+      copy.disabled = !node.playable;
+
+      const star = document.createElement("button");
+      star.className = "playlet-icon-btn";
+      star.dataset.kind = "ghost";
+      star.dataset.action = "search-toggle-star";
+      star.dataset.searchNodeId = node.id;
+      star.textContent = state.stars[node.id] ? "★" : "☆";
+      star.disabled = !node.playable;
+
+      const add = document.createElement("button");
+      add.className = "playlet-icon-btn";
+      add.dataset.kind = "ghost";
+      add.dataset.action = "search-add-playlist";
+      add.dataset.searchNodeId = node.id;
+      add.textContent = "+";
+      add.disabled = !node.playable;
+
+      const play = document.createElement("button");
+      play.className = "playlet-icon-btn";
+      play.dataset.action = "search-play-item";
+      play.dataset.searchNodeId = node.id;
+      play.textContent = "▶";
+      play.disabled = !node.playable;
+
+      actions.append(copy, star, add, play);
+    }
+
+    row.append(left, main, actions);
+    return row;
+  }
+
+  function renderSearchRows() {
+    const frag = document.createDocumentFragment();
+    if (state.searchBusy) {
+      const empty = document.createElement("div");
+      empty.className = "playlet-empty";
+      empty.textContent = "Searching...";
+      frag.appendChild(empty);
+      return frag;
+    }
+    if (!state.searchResults.length) {
+      const empty = document.createElement("div");
+      empty.className = "playlet-empty";
+      empty.textContent = state.searchQuery ? "No results" : "Enter keyword and run Search.";
+      frag.appendChild(empty);
+      return frag;
+    }
+    for (const node of state.searchResults) {
+      frag.appendChild(buildSearchRow(node));
+    }
+    return frag;
+  }
+
   function getFavoriteItems() {
     return state.playlist.filter((item) => state.stars[item.sourceNodeId || item.id]);
   }
@@ -1231,11 +1488,20 @@ function createUi(root, mediaAdapter) {
 
     refs.tabPlaylist.textContent = `Playlist (${state.playlist.length})`;
     refs.tabFavorites.textContent = `Favorites (${getFavoriteItems().length})`;
+    refs.tabLibraryTree.dataset.active = state.libraryTab === "tree" ? "1" : "0";
+    refs.tabLibrarySearch.dataset.active = state.libraryTab === "search" ? "1" : "0";
+    refs.searchModeDlna.dataset.active = state.searchMode === SEARCH_MODE_DLNA ? "1" : "0";
+    refs.searchModeLocalTree.dataset.active = state.searchMode === SEARCH_MODE_LOCAL_TREE ? "1" : "0";
+    refs.searchModeLocalFull.dataset.active = state.searchMode === SEARCH_MODE_LOCAL_FULL ? "1" : "0";
+    refs.searchInput.value = state.searchQuery;
+    refs.searchStatus.textContent = state.searchStatus || `Mode: ${searchModeLabel(state.searchMode)}`;
     refs.tabPlaylist.dataset.active = state.listTab === "playlist" ? "1" : "0";
     refs.tabFavorites.dataset.active = state.listTab === "favorites" ? "1" : "0";
     refs.playlistClearBtn.disabled = !state.playlist.length;
     refs.shuffleBtn.disabled = state.playlist.length < 2;
     if (refs.modeBtn) refs.modeBtn.textContent = modeLabel(state.playMode);
+    refs.tree.style.display = state.libraryTab === "tree" ? "" : "none";
+    refs.searchPanel.style.display = state.libraryTab === "search" ? "" : "none";
   }
 
   function renderPlayerOnly() {
@@ -1271,6 +1537,12 @@ function createUi(root, mediaAdapter) {
     refs.tree.scrollTop = top;
   }
 
+  function renderSearchSection() {
+    const top = refs.searchResults.scrollTop;
+    refs.searchResults.replaceChildren(renderSearchRows());
+    refs.searchResults.scrollTop = top;
+  }
+
   function renderListSection() {
     const top = refs.playlist.scrollTop;
     refs.playlist.replaceChildren(state.listTab === "favorites" ? renderFavoritesRows() : renderPlaylistRows());
@@ -1280,6 +1552,7 @@ function createUi(root, mediaAdapter) {
   function render() {
     renderHeaderAndStatus();
     renderTreeSection();
+    renderSearchSection();
     renderListSection();
     renderPlayerOnly();
     renderToast();
@@ -1287,6 +1560,10 @@ function createUi(root, mediaAdapter) {
 
   function findPlaylistItem(id) {
     return state.playlist.find((x) => x.id === id) || null;
+  }
+
+  function findSearchNode(id) {
+    return state.searchResultNodes[id] || getTreeNode(id) || null;
   }
 
   async function playNode(node, playlistId = "") {
@@ -1378,6 +1655,132 @@ function createUi(root, mediaAdapter) {
     state.playlist.push(item);
     setState({ playlist: state.playlist, error: "" });
     setToast("Added to playlist");
+  }
+
+  function mergeSearchResults(nodes) {
+    const map = {};
+    const uniq = [];
+    for (const node of nodes) {
+      if (!node?.id || map[node.id]) continue;
+      map[node.id] = true;
+      uniq.push(node);
+      state.searchResultNodes[node.id] = node;
+      if (!getTreeNode(node.id)) {
+        ensureTreeNode({
+          id: node.id,
+          parentId: node.parentId || "",
+          kind: node.kind || "item",
+          title: node.title || "(untitled)",
+          childCount: node.childCount || 0,
+          expanded: false,
+          loading: false,
+          childrenLoaded: false,
+          childrenIds: [],
+          playable: node.playable || false,
+          bestResource: node.bestResource || null,
+          artist: node.artist || "",
+          album: node.album || "",
+          className: node.className || "",
+          durationSeconds: node.durationSeconds || null,
+        });
+      }
+    }
+    return uniq;
+  }
+
+  async function buildLocalFullIndex() {
+    if (!state.service) return [];
+    if (fullSearchIndex.built) return fullSearchIndex.items;
+    if (fullSearchIndex.building) {
+      while (fullSearchIndex.building) {
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      return fullSearchIndex.items;
+    }
+    fullSearchIndex.building = true;
+    const out = [];
+    const seen = new Set();
+    const queue = ["0"];
+    while (queue.length) {
+      const containerId = queue.shift();
+      if (!containerId || seen.has(containerId)) continue;
+      seen.add(containerId);
+      const entries = await state.service.browse(containerId, 0, 500);
+      for (const entry of entries) {
+        out.push(entry);
+        if (entry.kind === "container") queue.push(entry.id);
+      }
+      setState({ searchStatus: `Indexing... ${out.length} entries` });
+    }
+    fullSearchIndex.items = out;
+    fullSearchIndex.built = true;
+    fullSearchIndex.building = false;
+    return out;
+  }
+
+  function invalidateFullSearchIndex() {
+    fullSearchIndex.built = false;
+    fullSearchIndex.building = false;
+    fullSearchIndex.items = [];
+  }
+
+  async function runSearch(query) {
+    if (!state.service) {
+      setState({ error: "Not connected", searchStatus: "Search unavailable" });
+      return;
+    }
+    const q = String(query || "").trim();
+    if (!q) {
+      setState({ searchQuery: "", searchResults: [], searchStatus: "Enter keyword" });
+      return;
+    }
+
+    setState({
+      searchQuery: q,
+      searchBusy: true,
+      searchStatus: `Searching (${searchModeLabel(state.searchMode)})...`,
+      error: "",
+    });
+
+    try {
+      let results = [];
+      if (state.searchMode === SEARCH_MODE_DLNA) {
+        try {
+          const criteria = buildDlnaSearchCriteria(q);
+          results = await state.service.search("0", criteria, 0, 300, "");
+          results = results.filter((x) => x.kind === "item" || x.kind === "container");
+        } catch (err) {
+          if (err?.code === "SEARCH_UNAVAILABLE") {
+            setToast("DLNA Search unavailable, fallback to Local: Full");
+            setState({ searchMode: SEARCH_MODE_LOCAL_FULL });
+            const localItems = await buildLocalFullIndex();
+            results = localItems.filter((x) => textMatchesKeyword(x, q));
+          } else {
+            throw err;
+          }
+        }
+      } else if (state.searchMode === SEARCH_MODE_LOCAL_TREE) {
+        const treeItems = Object.values(state.treeNodes).filter((x) => x.id !== "0");
+        results = treeItems.filter((x) => textMatchesKeyword(x, q));
+      } else {
+        const localItems = await buildLocalFullIndex();
+        results = localItems.filter((x) => textMatchesKeyword(x, q));
+      }
+
+      const merged = mergeSearchResults(results);
+      setState({
+        searchResults: merged,
+        searchBusy: false,
+        searchStatus: `Found ${merged.length} result(s) · ${searchModeLabel(state.searchMode)}`,
+      });
+    } catch (err) {
+      setState({
+        searchBusy: false,
+        searchResults: [],
+        searchStatus: `Search failed · ${searchModeLabel(state.searchMode)}`,
+        error: `Search failed: ${err.message}`,
+      });
+    }
   }
 
   function makePlaylistItemFromTrack(trackNode) {
@@ -1533,6 +1936,7 @@ function createUi(root, mediaAdapter) {
     if (!rootNode) return;
     setState({ busy: true });
     rootNode.childrenLoaded = false;
+    invalidateFullSearchIndex();
     await loadChildren("0", true);
   }
 
@@ -1555,6 +1959,10 @@ function createUi(root, mediaAdapter) {
       state.service = client;
       state.serviceName = client.serviceName;
       resetTree();
+      invalidateFullSearchIndex();
+      state.searchResults = [];
+      state.searchResultNodes = {};
+      state.searchStatus = "";
       setState({
         service: client,
         serviceName: client.serviceName,
@@ -1597,6 +2005,30 @@ function createUi(root, mediaAdapter) {
     }
     if (action === "refresh") {
       await refreshTree();
+      return;
+    }
+    if (action === "tab-library-tree") {
+      setState({ libraryTab: "tree" });
+      return;
+    }
+    if (action === "tab-library-search") {
+      setState({ libraryTab: "search" });
+      return;
+    }
+    if (action === "search-mode-dlna") {
+      setState({ searchMode: SEARCH_MODE_DLNA });
+      return;
+    }
+    if (action === "search-mode-local-tree") {
+      setState({ searchMode: SEARCH_MODE_LOCAL_TREE });
+      return;
+    }
+    if (action === "search-mode-local-full") {
+      setState({ searchMode: SEARCH_MODE_LOCAL_FULL });
+      return;
+    }
+    if (action === "search-run") {
+      await runSearch(refs.searchInput?.value || "");
       return;
     }
     if (action === "tab-playlist") {
@@ -1661,8 +2093,20 @@ function createUi(root, mediaAdapter) {
       await playNode(getTreeNode(target.dataset.nodeId || ""));
       return;
     }
+    if (action === "search-play-item") {
+      await playNode(findSearchNode(target.dataset.searchNodeId || ""));
+      return;
+    }
     if (action === "add-playlist") {
       addNodeToPlaylist(getTreeNode(target.dataset.nodeId || ""));
+      return;
+    }
+    if (action === "search-add-playlist") {
+      addNodeToPlaylist(findSearchNode(target.dataset.searchNodeId || ""));
+      return;
+    }
+    if (action === "search-toggle-star") {
+      toggleStar(target.dataset.searchNodeId || "");
       return;
     }
     if (action === "add-folder-playlist") {
@@ -1671,6 +2115,17 @@ function createUi(root, mediaAdapter) {
     }
     if (action === "copy-url") {
       const url = getTreeNode(target.dataset.nodeId || "")?.bestResource?.url;
+      if (!url) return;
+      try {
+        await copyText(url);
+        setToast("Media URL copied");
+      } catch (err) {
+        setState({ error: `Copy failed: ${err.message}` });
+      }
+      return;
+    }
+    if (action === "search-copy-url") {
+      const url = findSearchNode(target.dataset.searchNodeId || "")?.bestResource?.url;
       if (!url) return;
       try {
         await copyText(url);
@@ -1723,6 +2178,12 @@ function createUi(root, mediaAdapter) {
     evt.dataTransfer.setData("text/plain", playlistDragId);
   });
 
+  refs.searchInput?.addEventListener("keydown", async (evt) => {
+    if (evt.key !== "Enter") return;
+    evt.preventDefault();
+    await runSearch(refs.searchInput?.value || "");
+  });
+
   refs.playlist.addEventListener("dragover", (evt) => {
     const row = evt.target.closest("[data-drag-id]");
     if (!row) return;
@@ -1760,15 +2221,21 @@ function createUi(root, mediaAdapter) {
   listeners.add(render);
   mediaAdapter.onState = () => renderPlayerOnly();
   const nativeAudioEl = mediaAdapter.getElement?.();
-  nativeAudioEl?.addEventListener("ended", () => {
+  const onAudioEnded = () => {
     playNextInPlaylist().catch((err) => {
       setState({ error: `Next track failed: ${err.message}` });
     });
-  });
+  };
+  nativeAudioEl?.addEventListener("ended", onAudioEnded);
 
   return {
     render,
     connectAndLoad,
+    dispose() {
+      listeners.delete(render);
+      mediaAdapter.onState = null;
+      nativeAudioEl?.removeEventListener("ended", onAudioEnded);
+    },
   };
 }
 
@@ -1809,20 +2276,40 @@ function installDebug(runtime) {
 }
 
 export async function bootPlaylet({ baseUrl, version }) {
-  if (window[PLAYLET_RUNTIME_KEY]?.dispose) {
-    window[PLAYLET_RUNTIME_KEY].dispose();
+  const resolvedVersion = version || "dev";
+  const resolvedBaseUrl = baseUrl || "";
+  const initialDesc = detectMockHint() || inferDefaultDescUrl();
+  const existing = window[PLAYLET_RUNTIME_KEY];
+
+  if (
+    existing &&
+    existing.baseUrl === resolvedBaseUrl &&
+    existing.version === resolvedVersion &&
+    typeof existing.reconnect === "function"
+  ) {
+    await existing.reconnect(initialDesc);
+    return existing;
   }
+
+  if (existing?.dispose) existing.dispose();
 
   clearToastTimer();
   resetTree();
 
   state.initialized = true;
-  state.version = version || "dev";
-  state.baseUrl = baseUrl || "";
+  state.version = resolvedVersion;
+  state.baseUrl = resolvedBaseUrl;
   state.busy = false;
   state.showAdvanced = false;
   state.service = null;
   state.serviceName = "";
+  state.libraryTab = "tree";
+  state.searchMode = SEARCH_MODE_DLNA;
+  state.searchQuery = "";
+  state.searchBusy = false;
+  state.searchStatus = "";
+  state.searchResults = [];
+  state.searchResultNodes = {};
   const restored = loadPrefsFromStorage();
   state.playlist = [];
   state.stars = restored?.stars || {};
@@ -1838,7 +2325,6 @@ export async function bootPlaylet({ baseUrl, version }) {
   const mediaAdapter = new HtmlMediaAdapter();
   const ui = createUi(root, mediaAdapter);
 
-  const initialDesc = detectMockHint() || inferDefaultDescUrl();
   setState({ descUrl: initialDesc });
   ui.render();
 
@@ -1846,11 +2332,16 @@ export async function bootPlaylet({ baseUrl, version }) {
   await ui.connectAndLoad(initialDesc, true);
 
   const runtime = {
-    version,
-    baseUrl,
+    version: resolvedVersion,
+    baseUrl: resolvedBaseUrl,
+    async reconnect(descUrl) {
+      const nextDesc = descUrl || detectMockHint() || inferDefaultDescUrl();
+      setState({ descUrl: nextDesc });
+      await ui.connectAndLoad(nextDesc, false);
+    },
     dispose() {
       clearToastTimer();
-      listeners.clear();
+      ui.dispose?.();
       mediaAdapter.destroy();
       root.remove();
     },
