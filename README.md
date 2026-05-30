@@ -60,13 +60,34 @@ npm run dev
 
 Open:
 
-- `http://127.0.0.1:8788/index.html?playlet_desc=http://127.0.0.1:8788/mock/rootDesc.xml`
+- `http://127.0.0.1:8788/playlet/index.html?playlet_desc=http://127.0.0.1:8788/playlet/mock/rootDesc.xml`
 
 Then in DevTools console:
 
 ```js
-import("http://127.0.0.1:8788/loader.js")
+import("http://127.0.0.1:8788/playlet/loader.js")
 ```
+
+### Live NAS proxy debug (same-origin)
+
+Proxy a real DLNA host into local same-origin with route split:
+
+- `/playlet/*` -> local debug assets (index, loader, debug iframe helper)
+- `/*` -> reverse proxy to your DLNA server
+
+```bash
+npm run dev -- --dlna-base http://192.168.1.5:8200/
+```
+
+Then open:
+
+- `http://127.0.0.1:8788/playlet/debug`
+
+This page uses an iframe + one-click inject button to simulate bookmarklet behavior:
+
+- iframe loads `/` (your real DLNA page via proxy)
+- it sets `?playlet_desc=http://127.0.0.1:8788/rootDesc.xml` on iframe URL
+- then executes `import("/playlet/loader.js")` inside iframe window
 
 ## Build
 

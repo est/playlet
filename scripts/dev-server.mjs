@@ -1,4 +1,5 @@
 import http from "node:http";
+import https from "node:https";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,8 +9,38 @@ const repoRoot = path.resolve(__dirname, "..");
 const distMode = process.argv.includes("--dist");
 const publicDir = distMode ? path.join(repoRoot, "dist") : path.join(repoRoot, "src");
 const port = Number(process.env.PORT || 8788);
-
+const PLAYLET_PREFIX = "/playlet";
 const SAMPLE_TRACK_PATH = "/mock/media/sample.wav";
+
+function argValue(name) {
+  const i = process.argv.indexOf(name);
+  if (i < 0) return "";
+  return process.argv[i + 1] || "";
+}
+
+const liveDlnaBase = argValue("--dlna-base");
+const liveDlnaTarget = liveDlnaBase ? new URL(liveDlnaBase) : null;
+
+function send(res, status, body, headers = {}) {
+  res.writeHead(status, headers);
+  res.end(body);
+}
+
+function contentTypeByExt(filePath) {
+  if (filePath.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (filePath.endsWith(".html")) return "text/html; charset=utf-8";
+  if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
+  if (filePath.endsWith(".xml")) return "application/xml; charset=utf-8";
+  if (filePath.endsWith(".json")) return "application/json; charset=utf-8";
+  if (filePath.endsWith(".wav")) return "audio/wav";
+  return "application/octet-stream";
+}
+
+function stripPrefix(pathname, prefix) {
+  if (pathname === prefix) return "/";
+  if (pathname.startsWith(prefix + "/")) return pathname.slice(prefix.length);
+  return null;
+}
 
 function createSineWaveWav({ durationSec = 2, sampleRate = 22050, freq = 440 }) {
   const frameCount = Math.floor(durationSec * sampleRate);
@@ -43,21 +74,6 @@ function createSineWaveWav({ durationSec = 2, sampleRate = 22050, freq = 440 }) 
 
 const sampleWav = createSineWaveWav({});
 
-function contentTypeByExt(filePath) {
-  if (filePath.endsWith(".js")) return "text/javascript; charset=utf-8";
-  if (filePath.endsWith(".html")) return "text/html; charset=utf-8";
-  if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
-  if (filePath.endsWith(".xml")) return "application/xml; charset=utf-8";
-  if (filePath.endsWith(".json")) return "application/json; charset=utf-8";
-  if (filePath.endsWith(".wav")) return "audio/wav";
-  return "application/octet-stream";
-}
-
-function send(res, status, body, headers = {}) {
-  res.writeHead(status, headers);
-  res.end(body);
-}
-
 function xmlEscape(text) {
   return String(text)
     .replaceAll("&", "&amp;")
@@ -85,14 +101,7 @@ function browseResponse({ objectId, host }) {
     <upnp:artist>Playlet Mock</upnp:artist>
     <upnp:album>Demo Album</upnp:album>
     <upnp:class>object.item.audioItem.musicTrack</upnp:class>
-    <res protocolInfo="http-get:*:audio/wav:DLNA.ORG_OP=01;DLNA.ORG_CI=0" duration="00:00:02">http://${host}${SAMPLE_TRACK_PATH}</res>
-  </item>
-  <item id="track-2" parentID="album-1" restricted="1">
-    <dc:title>Broken Track (for error test)</dc:title>
-    <upnp:artist>Playlet Mock</upnp:artist>
-    <upnp:album>Demo Album</upnp:album>
-    <upnp:class>object.item.audioItem.musicTrack</upnp:class>
-    <res protocolInfo="http-get:*:audio/mpeg:*">http://${host}/mock/media/missing.mp3</res>
+    <res protocolInfo="http-get:*:audio/wav:DLNA.ORG_OP=01;DLNA.ORG_CI=0" duration="00:00:02">http://${host}${PLAYLET_PREFIX}${SAMPLE_TRACK_PATH}</res>
   </item>
 </DIDL-Lite>`;
   } else {
@@ -100,7 +109,6 @@ function browseResponse({ objectId, host }) {
   }
 
   const escapedDidl = xmlEscape(didl.trim());
-
   return `<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
   <s:Body>
@@ -114,12 +122,10 @@ function browseResponse({ objectId, host }) {
 </s:Envelope>`;
 }
 
-function rootDesc(host) {
+function rootDesc() {
   return `<?xml version="1.0"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">
-  <specVersion>
-    <major>1</major><minor>0</minor>
-  </specVersion>
+  <specVersion><major>1</major><minor>0</minor></specVersion>
   <device>
     <deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>
     <friendlyName>Playlet Mock DLNA</friendlyName>
@@ -130,16 +136,59 @@ function rootDesc(host) {
       <service>
         <serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>
         <serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId>
-        <controlURL>/mock/control</controlURL>
-        <eventSubURL>/mock/event</eventSubURL>
-        <SCPDURL>/mock/scpd.xml</SCPDURL>
+        <controlURL>${PLAYLET_PREFIX}/mock/control</controlURL>
+        <eventSubURL>${PLAYLET_PREFIX}/mock/event</eventSubURL>
+        <SCPDURL>${PLAYLET_PREFIX}/mock/scpd.xml</SCPDURL>
       </service>
     </serviceList>
   </device>
 </root>`;
 }
 
-async function serveStatic(reqPath, res) {
+function filteredProxyHeaders(headers, targetHost) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    const key = k.toLowerCase();
+    if (key === "host") continue;
+    if (key === "origin") continue;
+    if (key === "referer") continue;
+    out[k] = v;
+  }
+  out.Host = targetHost;
+  return out;
+}
+
+async function proxyToLiveDlna(req, res, urlPathWithQuery) {
+  if (!liveDlnaTarget) {
+    return send(res, 503, "Live DLNA proxy not configured", { "Content-Type": "text/plain; charset=utf-8" });
+  }
+
+  const transport = liveDlnaTarget.protocol === "https:" ? https : http;
+  const options = {
+    protocol: liveDlnaTarget.protocol,
+    hostname: liveDlnaTarget.hostname,
+    port: liveDlnaTarget.port || (liveDlnaTarget.protocol === "https:" ? 443 : 80),
+    method: req.method,
+    path: urlPathWithQuery,
+    headers: filteredProxyHeaders(req.headers, liveDlnaTarget.host),
+  };
+
+  const upstreamReq = transport.request(options, (upstreamRes) => {
+    const headers = { ...upstreamRes.headers };
+    delete headers["content-security-policy"];
+    delete headers["x-frame-options"];
+    res.writeHead(upstreamRes.statusCode || 502, headers);
+    upstreamRes.pipe(res);
+  });
+
+  upstreamReq.on("error", (err) => {
+    send(res, 502, `Proxy request failed: ${err.message}`, { "Content-Type": "text/plain; charset=utf-8" });
+  });
+
+  req.pipe(upstreamReq);
+}
+
+async function serveStaticAsset(reqPath, res) {
   const safe = reqPath === "/" ? "/index.html" : reqPath;
   const fullPath = path.join(publicDir, safe);
   try {
@@ -147,39 +196,83 @@ async function serveStatic(reqPath, res) {
     if (st.isDirectory()) {
       const idx = path.join(fullPath, "index.html");
       const content = await readFile(idx);
-      send(res, 200, content, { "Content-Type": "text/html; charset=utf-8" });
-      return;
+      return send(res, 200, content, { "Content-Type": "text/html; charset=utf-8" });
     }
     const content = await readFile(fullPath);
-    send(res, 200, content, { "Content-Type": contentTypeByExt(fullPath) });
+    return send(res, 200, content, { "Content-Type": contentTypeByExt(fullPath) });
   } catch {
-    send(res, 404, "Not found", { "Content-Type": "text/plain; charset=utf-8" });
+    return send(res, 404, "Not found", { "Content-Type": "text/plain; charset=utf-8" });
   }
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url || "/", `http://${req.headers.host || `127.0.0.1:${port}`}`);
-
-  if (req.method === "GET" && url.pathname === "/mock/rootDesc.xml") {
-    return send(res, 200, rootDesc(req.headers.host || `127.0.0.1:${port}`), {
-      "Content-Type": "application/xml; charset=utf-8",
+function playletDebugHtml(host) {
+  const descHint = liveDlnaTarget ? `http://${host}/rootDesc.xml` : `http://${host}${PLAYLET_PREFIX}/mock/rootDesc.xml`;
+  const iframeSrc = liveDlnaTarget ? "/" : `${PLAYLET_PREFIX}/`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Playlet Proxy Debug</title>
+  <style>
+    body { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 10px; font-size: 12px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; white-space: nowrap; }
+    .title { font-weight: 700; font-size: 12px; color: #0f172a; }
+    .hint { color: #475569; font-size: 11px; }
+    input, button { font: inherit; padding: 4px 8px; }
+    input { flex: 1; min-width: 220px; }
+    iframe { width: 100%; height: calc(100vh - 70px); border: 1px solid #cbd5e1; border-radius: 8px; }
+    code { background: #f1f5f9; padding: 1px 5px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <span class="title">Playlet Local Proxy Debug</span>
+    <label>Desc URL</label>
+    <input id="desc" size="52" value="${descHint}" />
+    <button id="inject">Inject Bookmarklet (import)</button>
+    <span class="hint">inject <code>import('/playlet/loader.js')</code> into iframe</span>
+  </div>
+  <iframe id="frame" src="${iframeSrc}"></iframe>
+  <script>
+    const frame = document.getElementById('frame');
+    const input = document.getElementById('desc');
+    document.getElementById('inject').addEventListener('click', async () => {
+      const desc = input.value.trim();
+      const w = frame.contentWindow;
+      if (!w) return;
+      w.history.replaceState({}, '', '?playlet_desc=' + encodeURIComponent(desc));
+      try {
+        await w.eval('import("${PLAYLET_PREFIX}/loader.js")');
+      } catch (e) {
+        alert('inject failed: ' + e.message);
+      }
     });
+  </script>
+</body>
+</html>`;
+}
+
+async function handlePlayletRoutes(req, res, pathOnly, host) {
+  if (req.method === "GET" && pathOnly === "/debug") {
+    return send(res, 200, playletDebugHtml(host), { "Content-Type": "text/html; charset=utf-8" });
   }
 
-  if (req.method === "POST" && url.pathname === "/mock/control") {
+  if (req.method === "GET" && pathOnly === "/mock/rootDesc.xml") {
+    return send(res, 200, rootDesc(), { "Content-Type": "application/xml; charset=utf-8" });
+  }
+
+  if (req.method === "POST" && pathOnly === "/mock/control") {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = Buffer.concat(chunks).toString("utf8");
     const objectIdMatch = body.match(/<ObjectID>([^<]+)<\/ObjectID>/);
     const objectId = objectIdMatch ? objectIdMatch[1] : "0";
-    const soap = browseResponse({ objectId, host: req.headers.host || `127.0.0.1:${port}` });
-
-    return send(res, 200, soap, {
-      "Content-Type": "text/xml; charset=utf-8",
-    });
+    const soap = browseResponse({ objectId, host });
+    return send(res, 200, soap, { "Content-Type": "text/xml; charset=utf-8" });
   }
 
-  if (req.method === "GET" && url.pathname === SAMPLE_TRACK_PATH) {
+  if (req.method === "GET" && pathOnly === SAMPLE_TRACK_PATH) {
     return send(res, 200, sampleWav, {
       "Content-Type": "audio/wav",
       "Content-Length": sampleWav.byteLength,
@@ -188,37 +281,38 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  if (req.method === "GET" && url.pathname === "/index.html" && !distMode) {
-    const html = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Playlet Local Debug</title>
-  <style>
-    body { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; }
-    code { background: #f1f5f9; padding: 2px 6px; border-radius: 6px; }
-  </style>
-</head>
-<body>
-  <h1>Playlet Local Debug</h1>
-  <p>Open this page and run this in DevTools console:</p>
-  <pre>import("http://127.0.0.1:${port}/loader.js")</pre>
-  <p>Mock DLNA description URL:</p>
-  <pre>http://127.0.0.1:${port}/mock/rootDesc.xml</pre>
-  <p>Or add query param to auto-fill:</p>
-  <pre>?playlet_desc=http://127.0.0.1:${port}/mock/rootDesc.xml</pre>
-</body>
-</html>`;
-    return send(res, 200, html, { "Content-Type": "text/html; charset=utf-8" });
+  return serveStaticAsset(pathOnly, res);
+}
+
+const server = http.createServer(async (req, res) => {
+  const host = req.headers.host || `127.0.0.1:${port}`;
+  const url = new URL(req.url || "/", `http://${host}`);
+  const playletPath = stripPrefix(url.pathname, PLAYLET_PREFIX);
+
+  if (playletPath !== null) {
+    return handlePlayletRoutes(req, res, playletPath, host);
   }
 
-  return serveStatic(url.pathname, res);
+  if (liveDlnaTarget) {
+    // Any non-/playlet path is forwarded to DLNA origin unchanged.
+    return proxyToLiveDlna(req, res, url.pathname + url.search);
+  }
+
+  // No live target: keep root usable by serving local assets (for mock-only debug).
+  return serveStaticAsset(url.pathname, res);
 });
 
 server.listen(port, "127.0.0.1", () => {
   const mode = distMode ? "dist" : "src";
   console.log(`[dev-server] mode=${mode}`);
   console.log(`[dev-server] http://127.0.0.1:${port}`);
-  console.log(`[dev-server] mock desc: http://127.0.0.1:${port}/mock/rootDesc.xml`);
+  console.log(`[dev-server] playlet ui: http://127.0.0.1:${port}${PLAYLET_PREFIX}/`);
+  console.log(`[dev-server] playlet debug: http://127.0.0.1:${port}${PLAYLET_PREFIX}/debug`);
+  if (liveDlnaTarget) {
+    console.log(`[dev-server] live proxy root -> ${liveDlnaTarget.href}`);
+    console.log(`[dev-server] route split: /playlet/* local, /* DLNA proxy`);
+  } else {
+    console.log(`[dev-server] no live proxy; root serves local files`);
+    console.log(`[dev-server] mock desc: http://127.0.0.1:${port}${PLAYLET_PREFIX}/mock/rootDesc.xml`);
+  }
 });

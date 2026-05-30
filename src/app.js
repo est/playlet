@@ -634,12 +634,15 @@ function createStyles() {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"] .playlet-row-sub {
+#${PLAYLET_ROOT_ID} .playlet-folder-count {
+  margin-left: 6px;
+  font-size: 10px;
+  color: #6a7486;
   opacity: 0;
   transition: opacity 120ms ease;
 }
-#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"]:hover .playlet-row-sub,
-#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"]:focus-within .playlet-row-sub {
+#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"]:hover .playlet-folder-count,
+#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"]:focus-within .playlet-folder-count {
   opacity: 1;
 }
 #${PLAYLET_ROOT_ID} .playlet-row-actions {
@@ -680,6 +683,14 @@ function createStyles() {
   display: inline-block;
   width: 10px;
   height: 1px;
+}
+#${PLAYLET_ROOT_ID} .playlet-track-index {
+  display: inline-block;
+  width: 24px;
+  text-align: right;
+  padding-right: 2px;
+  font-variant-numeric: tabular-nums;
+  color: #53617a;
 }
 #${PLAYLET_ROOT_ID} .playlet-foot {
   border-top: 1px solid #dde4ef;
@@ -1010,16 +1021,17 @@ function createUi(root, mediaAdapter) {
       const title = document.createElement("div");
       title.className = "playlet-row-title";
       title.textContent = `${isContainer ? "📁" : "🎵"} ${node.title}`;
+      if (isContainer) {
+        const count = document.createElement("span");
+        count.className = "playlet-folder-count";
+        count.textContent = `${node.childCount || 0} items`;
+        title.appendChild(count);
+      }
       main.appendChild(title);
       if (sub) {
         const subEl = document.createElement("div");
         subEl.className = "playlet-row-sub";
         subEl.textContent = sub;
-        main.appendChild(subEl);
-      } else if (isContainer) {
-        const subEl = document.createElement("div");
-        subEl.className = "playlet-row-sub";
-        subEl.textContent = `${node.childCount || 0} items`;
         main.appendChild(subEl);
       }
 
@@ -1089,7 +1101,7 @@ function createUi(root, mediaAdapter) {
     }
 
     const index = document.createElement("span");
-    index.className = "playlet-item-indent";
+    index.className = "playlet-track-index";
     index.textContent = String(idx + 1);
 
     const main = document.createElement("div");
