@@ -22,6 +22,7 @@ const state = {
   playlist: [],
   stars: {},
   playMode: MODE_LOOP_ALL,
+  listTab: "playlist",
   nowPlaying: null,
   nowPlayingPlaylistId: "",
   toast: "",
@@ -583,6 +584,25 @@ function createStyles() {
   height: 34%;
   min-height: 92px;
 }
+#${PLAYLET_ROOT_ID} .playlet-tabs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+#${PLAYLET_ROOT_ID} .playlet-tab {
+  border: 1px solid #bed0f2;
+  color: #204a97;
+  background: #fff;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  cursor: pointer;
+}
+#${PLAYLET_ROOT_ID} .playlet-tab[data-active="1"] {
+  background: #2d6cdf;
+  border-color: #2d6cdf;
+  color: #fff;
+}
 #${PLAYLET_ROOT_ID} .playlet-row {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -617,6 +637,21 @@ function createStyles() {
 #${PLAYLET_ROOT_ID} .playlet-row-actions {
   display: flex;
   gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+#${PLAYLET_ROOT_ID} .playlet-row:hover .playlet-row-actions,
+#${PLAYLET_ROOT_ID} .playlet-row:focus-within .playlet-row-actions,
+#${PLAYLET_ROOT_ID} .playlet-row[data-now="1"] .playlet-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none), (pointer: coarse) {
+  #${PLAYLET_ROOT_ID} .playlet-row-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 #${PLAYLET_ROOT_ID} .playlet-twisty {
   width: 18px;
@@ -651,6 +686,16 @@ function createStyles() {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+}
+#${PLAYLET_ROOT_ID} .playlet-now-inline {
+  font-size: 11px;
+  color: #334158;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 52%;
 }
 #${PLAYLET_ROOT_ID} .playlet-range {
   width: 100%;
@@ -847,17 +892,20 @@ function createUi(root, mediaAdapter) {
   <div class="playlet-main">
     <div class="playlet-section-title">Library Tree (+/-)</div>
     <div class="playlet-tree playlet-scroll-zone" data-role="tree" data-scroll-zone="tree"></div>
-    <div class="playlet-section-title" data-role="playlist-title">Playlist (0)</div>
+    <div class="playlet-section-title">
+      <div class="playlet-tabs">
+        <button class="playlet-tab" data-action="tab-playlist" data-role="tab-playlist">Playlist (0)</button>
+        <button class="playlet-tab" data-action="tab-favorites" data-role="tab-favorites">Favorites (0)</button>
+      </div>
+    </div>
     <div class="playlet-playlist playlet-scroll-zone" data-role="playlist" data-scroll-zone="playlist"></div>
-    <div class="playlet-section-title" data-role="favorites-title">Favorites (0)</div>
-    <div class="playlet-playlist playlet-scroll-zone" data-role="favorites" data-scroll-zone="favorites"></div>
   </div>
   <div class="playlet-foot">
-    <div class="playlet-now" data-role="now"></div>
     <div class="playlet-controls">
       <button class="playlet-btn" data-action="play-toggle">Play</button>
       <button class="playlet-btn" data-kind="ghost" data-action="next">Next</button>
       <button class="playlet-btn" data-kind="ghost" data-action="cycle-mode" title="play mode"></button>
+      <div class="playlet-now-inline" data-role="now"></div>
     </div>
     <div class="playlet-native-audio" data-role="native-audio"></div>
     <div class="playlet-status" data-role="status"></div>
@@ -874,10 +922,9 @@ function createUi(root, mediaAdapter) {
     descInput: root.querySelector('[data-role="desc-input"]'),
     error: root.querySelector('[data-role="error"]'),
     tree: root.querySelector('[data-role="tree"]'),
-    playlistTitle: root.querySelector('[data-role="playlist-title"]'),
+    tabPlaylist: root.querySelector('[data-role="tab-playlist"]'),
+    tabFavorites: root.querySelector('[data-role="tab-favorites"]'),
     playlist: root.querySelector('[data-role="playlist"]'),
-    favoritesTitle: root.querySelector('[data-role="favorites-title"]'),
-    favorites: root.querySelector('[data-role="favorites"]'),
     now: root.querySelector('[data-role="now"]'),
     playToggleBtn: root.querySelector('[data-action="play-toggle"]'),
     nextBtn: root.querySelector('[data-action="next"]'),
@@ -907,7 +954,6 @@ function createUi(root, mediaAdapter) {
   }
   attachScrollIsolation(refs.tree);
   attachScrollIsolation(refs.playlist);
-  attachScrollIsolation(refs.favorites);
 
   let playlistDragId = "";
 
@@ -1090,9 +1136,13 @@ function createUi(root, mediaAdapter) {
     return frag;
   }
 
+  function getFavoriteItems() {
+    return state.playlist.filter((item) => state.stars[item.sourceNodeId || item.id]);
+  }
+
   function renderFavoritesRows() {
     const frag = document.createDocumentFragment();
-    const favorites = state.playlist.filter((item) => state.stars[item.sourceNodeId || item.id]);
+    const favorites = getFavoriteItems();
     if (!favorites.length) {
       const empty = document.createElement("div");
       empty.className = "playlet-empty";
@@ -1122,8 +1172,10 @@ function createUi(root, mediaAdapter) {
       refs.error.textContent = "";
     }
 
-    refs.playlistTitle.textContent = `Playlist (${state.playlist.length})`;
-    refs.favoritesTitle.textContent = `Favorites (${state.playlist.filter((x) => state.stars[x.sourceNodeId || x.id]).length})`;
+    refs.tabPlaylist.textContent = `Playlist (${state.playlist.length})`;
+    refs.tabFavorites.textContent = `Favorites (${getFavoriteItems().length})`;
+    refs.tabPlaylist.dataset.active = state.listTab === "playlist" ? "1" : "0";
+    refs.tabFavorites.dataset.active = state.listTab === "favorites" ? "1" : "0";
   }
 
   function renderPlayerOnly() {
@@ -1160,23 +1212,16 @@ function createUi(root, mediaAdapter) {
     refs.tree.scrollTop = top;
   }
 
-  function renderPlaylistSection() {
+  function renderListSection() {
     const top = refs.playlist.scrollTop;
-    refs.playlist.replaceChildren(renderPlaylistRows());
+    refs.playlist.replaceChildren(state.listTab === "favorites" ? renderFavoritesRows() : renderPlaylistRows());
     refs.playlist.scrollTop = top;
-  }
-
-  function renderFavoritesSection() {
-    const top = refs.favorites.scrollTop;
-    refs.favorites.replaceChildren(renderFavoritesRows());
-    refs.favorites.scrollTop = top;
   }
 
   function render() {
     renderHeaderAndStatus();
     renderTreeSection();
-    renderPlaylistSection();
-    renderFavoritesSection();
+    renderListSection();
     renderPlayerOnly();
     renderToast();
   }
@@ -1432,6 +1477,14 @@ function createUi(root, mediaAdapter) {
       await refreshTree();
       return;
     }
+    if (action === "tab-playlist") {
+      setState({ listTab: "playlist" });
+      return;
+    }
+    if (action === "tab-favorites") {
+      setState({ listTab: "favorites" });
+      return;
+    }
     if (action === "root") {
       const rootNode = getTreeNode("0");
       if (!rootNode) return;
@@ -1636,6 +1689,7 @@ export async function bootPlaylet({ baseUrl, version }) {
   state.playlist = restored?.playlist || [];
   state.stars = restored?.stars || {};
   state.playMode = restored?.playMode || MODE_LOOP_ALL;
+  state.listTab = "playlist";
   state.nowPlaying = null;
   state.nowPlayingPlaylistId = "";
   state.toast = "";
