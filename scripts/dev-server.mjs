@@ -247,38 +247,35 @@ function playletDebugHtml(host) {
           fixStatus.textContent = 'audio fix: failed';
           return;
         }
-        w.eval(`
-          (() => {
-            if (window.__playletDebugAudioFixInstalled) return true;
-            const RETRY_KEY = '__playletProxyRetrySrc';
-            const bind = (audio) => {
-              if (!audio || audio.__playletAudioFixBound) return;
-              audio.__playletAudioFixBound = true;
-              audio.onerror = (e) => {
-                const el = e && e.target;
-                if (!el) return;
-                const current = el.currentSrc || el.src || '';
-                if (!current || el[RETRY_KEY] === current) return;
-                try {
-                  const u = new URL(current, location.href);
-                  if (u.origin === location.origin) return;
-                  if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
-                  el[RETRY_KEY] = current;
-                  const fixed = location.origin + u.pathname + u.search + u.hash;
-                  console.log('[playlet-debug] audio fallback', current, '->', fixed);
-                  el.src = fixed;
-                  el.play().catch(() => {});
-                } catch {}
-              };
-            };
-            bind(document.querySelector('audio'));
-            window.__playletDebugAudioFixTimer = window.__playletDebugAudioFixTimer || setInterval(() => {
-              bind(document.querySelector('audio'));
-            }, 1000);
-            window.__playletDebugAudioFixInstalled = true;
-            return true;
-          })();
-        `);
+        const fixScript =
+          "(function(){" +
+          "if(window.__playletDebugAudioFixInstalled)return true;" +
+          "var RETRY_KEY='__playletProxyRetrySrc';" +
+          "var bind=function(audio){" +
+          "if(!audio||audio.__playletAudioFixBound)return;" +
+          "audio.__playletAudioFixBound=true;" +
+          "audio.onerror=function(e){" +
+          "var el=e&&e.target;if(!el)return;" +
+          "var current=el.currentSrc||el.src||'';" +
+          "if(!current||el[RETRY_KEY]===current)return;" +
+          "try{" +
+          "var u=new URL(current,location.href);" +
+          "if(u.origin===location.origin)return;" +
+          "if(u.protocol!=='http:'&&u.protocol!=='https:')return;" +
+          "el[RETRY_KEY]=current;" +
+          "var fixed=location.origin+u.pathname+u.search+u.hash;" +
+          "console.log('[playlet-debug] audio fallback',current,'->',fixed);" +
+          "el.src=fixed;" +
+          "el.play().catch(function(){});" +
+          "}catch(_e){}" +
+          "};" +
+          "};" +
+          "bind(document.querySelector('audio'));" +
+          "window.__playletDebugAudioFixTimer=window.__playletDebugAudioFixTimer||setInterval(function(){bind(document.querySelector('audio'));},1000);" +
+          "window.__playletDebugAudioFixInstalled=true;" +
+          "return true;" +
+          "})();";
+        w.eval(fixScript);
         fixStatus.textContent = 'audio fix: on';
       } catch {
         fixStatus.textContent = 'audio fix: failed';
