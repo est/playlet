@@ -634,6 +634,14 @@ function createStyles() {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"] .playlet-row-sub {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"]:hover .playlet-row-sub,
+#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"]:focus-within .playlet-row-sub {
+  opacity: 1;
+}
 #${PLAYLET_ROOT_ID} .playlet-row-actions {
   display: flex;
   gap: 4px;
@@ -869,6 +877,7 @@ async function copyText(text) {
 }
 
 function createUi(root, mediaAdapter) {
+  const MAX_BULK_ADD = 500;
   root.innerHTML = `
 <div class="playlet-card">
   <div class="playlet-head">
@@ -983,6 +992,7 @@ function createUi(root, mediaAdapter) {
       const sub = isContainer ? "" : [node.artist, node.album].filter(Boolean).join(" · ") || node.className || "media item";
       const row = document.createElement("div");
       row.className = "playlet-row";
+      row.dataset.kind = node.kind;
       row.style.paddingLeft = `${6 + indent}px`;
       if (state.nowPlaying && node.kind === "item" && state.nowPlaying.id === node.id) {
         row.dataset.now = "1";
@@ -1006,11 +1016,24 @@ function createUi(root, mediaAdapter) {
         subEl.className = "playlet-row-sub";
         subEl.textContent = sub;
         main.appendChild(subEl);
+      } else if (isContainer) {
+        const subEl = document.createElement("div");
+        subEl.className = "playlet-row-sub";
+        subEl.textContent = `${node.childCount || 0} items`;
+        main.appendChild(subEl);
       }
 
       const actions = document.createElement("div");
       actions.className = "playlet-row-actions";
-      if (!isContainer) {
+      if (isContainer) {
+        const addAll = document.createElement("button");
+        addAll.className = "playlet-icon-btn";
+        addAll.dataset.kind = "ghost";
+        addAll.dataset.action = "add-folder-playlist";
+        addAll.dataset.nodeId = node.id;
+        addAll.textContent = "≡+";
+        actions.appendChild(addAll);
+      } else {
         const copy = document.createElement("button");
         copy.className = "playlet-icon-btn";
         copy.dataset.kind = "ghost";
@@ -1317,6 +1340,55 @@ function createUi(root, mediaAdapter) {
     setToast("Added to playlist");
   }
 
+  function makePlaylistItemFromTrack(trackNode) {
+    return {
+      id: `pl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      sourceNodeId: trackNode.id,
+      title: trackNode.title,
+      artist: trackNode.artist || "",
+      album: trackNode.album || "",
+      durationSeconds: trackNode.durationSeconds || null,
+      url: trackNode.bestResource.url,
+      protocolInfo: trackNode.bestResource.protocolInfo || "",
+    };
+  }
+
+  async function collectPlayableItemsRecursive(containerId, out, visited) {
+    if (!state.service || out.length >= MAX_BULK_ADD || visited.has(containerId)) return;
+    visited.add(containerId);
+    const entries = await state.service.browse(containerId, 0, 500);
+    for (const entry of entries) {
+      if (out.length >= MAX_BULK_ADD) break;
+      if (entry.kind === "item" && entry.playable && entry.bestResource?.url) {
+        out.push(entry);
+      } else if (entry.kind === "container") {
+        await collectPlayableItemsRecursive(entry.id, out, visited);
+      }
+    }
+  }
+
+  async function addFolderToPlaylist(nodeId) {
+    const node = getTreeNode(nodeId);
+    if (!node || node.kind !== "container") return;
+    try {
+      setState({ busy: true, error: "" });
+      const found = [];
+      await collectPlayableItemsRecursive(nodeId, found, new Set());
+      if (!found.length) {
+        setState({ busy: false });
+        setToast("No playable items found");
+        return;
+      }
+      const items = found.map(makePlaylistItemFromTrack);
+      state.playlist.push(...items);
+      savePrefsToStorage();
+      setState({ playlist: state.playlist, busy: false, error: "" });
+      setToast(`Added ${items.length}${items.length >= MAX_BULK_ADD ? "+" : ""} items`);
+    } catch (err) {
+      setState({ busy: false, error: `Bulk add failed: ${err.message}` });
+    }
+  }
+
   function removePlaylistItem(id) {
     const idx = state.playlist.findIndex((x) => x.id === id);
     if (idx < 0) return;
@@ -1529,6 +1601,10 @@ function createUi(root, mediaAdapter) {
     }
     if (action === "add-playlist") {
       addNodeToPlaylist(getTreeNode(target.dataset.nodeId || ""));
+      return;
+    }
+    if (action === "add-folder-playlist") {
+      await addFolderToPlaylist(target.dataset.nodeId || "");
       return;
     }
     if (action === "copy-url") {
