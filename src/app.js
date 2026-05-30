@@ -865,6 +865,27 @@ function createStyles() {
   color: #7a1b1b;
   background: #fce9e9;
   font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+#${PLAYLET_ROOT_ID} .playlet-error-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#${PLAYLET_ROOT_ID} .playlet-error-close {
+  border: 1px solid #e39e9e;
+  background: #fff6f6;
+  color: #7a1b1b;
+  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
 }
 #${PLAYLET_ROOT_ID} .playlet-toast {
   position: absolute;
@@ -1033,6 +1054,26 @@ async function copyText(text) {
 
 function createUi(root, mediaAdapter) {
   const MAX_BULK_ADD = 500;
+  let errorTimer = null;
+
+  function clearErrorTimer() {
+    if (errorTimer) {
+      clearTimeout(errorTimer);
+      errorTimer = null;
+    }
+  }
+
+  function setError(message, { autoHideMs = 0 } = {}) {
+    clearErrorTimer();
+    setState({ error: message || "" });
+    if (message && autoHideMs > 0) {
+      errorTimer = setTimeout(() => {
+        setState({ error: "" });
+        errorTimer = null;
+      }, autoHideMs);
+    }
+  }
+
   root.innerHTML = `
 <div class="playlet-card">
   <div class="playlet-head">
@@ -1052,7 +1093,10 @@ function createUi(root, mediaAdapter) {
       <button class="playlet-btn" data-action="connect">Connect</button>
     </div>
   </div>
-  <div class="playlet-error" data-role="error" style="display:none"></div>
+  <div class="playlet-error" data-role="error" style="display:none">
+    <span class="playlet-error-text" data-role="error-text"></span>
+    <button class="playlet-error-close" data-action="error-dismiss" title="Dismiss">×</button>
+  </div>
   <div class="playlet-main">
     <div class="playlet-section-title">
       <div class="playlet-tree-head">
@@ -1117,6 +1161,7 @@ function createUi(root, mediaAdapter) {
     advancedWrap: root.querySelector('[data-role="advanced-wrap"]'),
     descInput: root.querySelector('[data-role="desc-input"]'),
     error: root.querySelector('[data-role="error"]'),
+    errorText: root.querySelector('[data-role="error-text"]'),
     tabLibraryTree: root.querySelector('[data-role="tab-library-tree"]'),
     tabLibrarySearch: root.querySelector('[data-role="tab-library-search"]'),
     libraryPanel: root.querySelector('[data-role="library-panel"]'),
@@ -1480,10 +1525,10 @@ function createUi(root, mediaAdapter) {
 
     if (state.error) {
       refs.error.style.display = "block";
-      refs.error.textContent = state.error;
+      refs.errorText.textContent = state.error;
     } else {
       refs.error.style.display = "none";
-      refs.error.textContent = "";
+      refs.errorText.textContent = "";
     }
 
     refs.tabPlaylist.textContent = `Playlist (${state.playlist.length})`;
@@ -1586,7 +1631,7 @@ function createUi(root, mediaAdapter) {
         error: "",
       });
     } catch (err) {
-      setState({ error: `Play failed: ${err.message}` });
+      setError(`Play failed: ${err.message}`, { autoHideMs: 4500 });
     }
   }
 
@@ -1724,9 +1769,41 @@ function createUi(root, mediaAdapter) {
     fullSearchIndex.items = [];
   }
 
+  function setMediaSessionActionHandler(action, handler) {
+    if (!("mediaSession" in navigator)) return;
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch {
+      // Some browsers do not support all actions.
+    }
+  }
+
+  function installMediaSessionTrackHandlers() {
+    setMediaSessionActionHandler("previoustrack", async () => {
+      try {
+        await playPrevInPlaylist();
+      } catch (err) {
+        setError(`Previous track failed: ${err.message}`, { autoHideMs: 4500 });
+      }
+    });
+    setMediaSessionActionHandler("nexttrack", async () => {
+      try {
+        await playNextInPlaylist();
+      } catch (err) {
+        setError(`Next track failed: ${err.message}`, { autoHideMs: 4500 });
+      }
+    });
+  }
+
+  function clearMediaSessionTrackHandlers() {
+    setMediaSessionActionHandler("previoustrack", null);
+    setMediaSessionActionHandler("nexttrack", null);
+  }
+
   async function runSearch(query) {
     if (!state.service) {
-      setState({ error: "Not connected", searchStatus: "Search unavailable" });
+      setError("Not connected", { autoHideMs: 3500 });
+      setState({ searchStatus: "Search unavailable" });
       return;
     }
     const q = String(query || "").trim();
@@ -1778,8 +1855,8 @@ function createUi(root, mediaAdapter) {
         searchBusy: false,
         searchResults: [],
         searchStatus: `Search failed · ${searchModeLabel(state.searchMode)}`,
-        error: `Search failed: ${err.message}`,
       });
+      setError(`Search failed: ${err.message}`, { autoHideMs: 5000 });
     }
   }
 
@@ -1815,7 +1892,8 @@ function createUi(root, mediaAdapter) {
       setState({ playlist: state.playlist, busy: false, error: "" });
       setToast(`Added ${items.length}${items.length >= MAX_BULK_ADD ? "+" : ""} items`);
     } catch (err) {
-      setState({ busy: false, error: `Bulk add failed: ${err.message}` });
+      setState({ busy: false });
+      setError(`Bulk add failed: ${err.message}`, { autoHideMs: 5000 });
     }
   }
 
@@ -1926,7 +2004,8 @@ function createUi(root, mediaAdapter) {
       bumpTree();
     } catch (err) {
       node.loading = false;
-      setState({ busy: false, error: `Browse failed: ${err.message}` });
+      setState({ busy: false });
+      setError(`Browse failed: ${err.message}`, { autoHideMs: 5000 });
       bumpTree();
     }
   }
@@ -1976,9 +2055,9 @@ function createUi(root, mediaAdapter) {
         busy: false,
         service: null,
         serviceName: "",
-        error: silentError ? "" : err.message,
         showAdvanced: true,
       });
+      if (!silentError) setError(err.message, { autoHideMs: 6000 });
       if (silentError) {
         setToast("Auto connect failed. Set rootDesc URL.");
       }
@@ -1994,10 +2073,14 @@ function createUi(root, mediaAdapter) {
       setState({ showAdvanced: !state.showAdvanced });
       return;
     }
+    if (action === "error-dismiss") {
+      setError("");
+      return;
+    }
     if (action === "connect") {
       const value = refs.descInput?.value?.trim();
       if (!value) {
-        setState({ error: "Please enter rootDesc.xml URL" });
+        setError("Please enter rootDesc.xml URL", { autoHideMs: 3500 });
         return;
       }
       await connectAndLoad(value);
@@ -2057,7 +2140,7 @@ function createUi(root, mediaAdapter) {
         if (status.paused) await mediaAdapter.resume();
         else mediaAdapter.pause();
       } catch (err) {
-        setState({ error: `Playback toggle failed: ${err.message}` });
+        setError(`Playback toggle failed: ${err.message}`, { autoHideMs: 4500 });
       }
       return;
     }
@@ -2120,7 +2203,7 @@ function createUi(root, mediaAdapter) {
         await copyText(url);
         setToast("Media URL copied");
       } catch (err) {
-        setState({ error: `Copy failed: ${err.message}` });
+        setError(`Copy failed: ${err.message}`, { autoHideMs: 4000 });
       }
       return;
     }
@@ -2131,7 +2214,7 @@ function createUi(root, mediaAdapter) {
         await copyText(url);
         setToast("Media URL copied");
       } catch (err) {
-        setState({ error: `Copy failed: ${err.message}` });
+        setError(`Copy failed: ${err.message}`, { autoHideMs: 4000 });
       }
       return;
     }
@@ -2150,7 +2233,7 @@ function createUi(root, mediaAdapter) {
         await copyText(item.url);
         setToast("Playlist URL copied");
       } catch (err) {
-        setState({ error: `Copy failed: ${err.message}` });
+        setError(`Copy failed: ${err.message}`, { autoHideMs: 4000 });
       }
     }
     if (action === "favorite-copy") {
@@ -2160,7 +2243,7 @@ function createUi(root, mediaAdapter) {
         await copyText(item.url);
         setToast("Favorite URL copied");
       } catch (err) {
-        setState({ error: `Copy failed: ${err.message}` });
+        setError(`Copy failed: ${err.message}`, { autoHideMs: 4000 });
       }
       return;
     }
@@ -2223,15 +2306,18 @@ function createUi(root, mediaAdapter) {
   const nativeAudioEl = mediaAdapter.getElement?.();
   const onAudioEnded = () => {
     playNextInPlaylist().catch((err) => {
-      setState({ error: `Next track failed: ${err.message}` });
+      setError(`Next track failed: ${err.message}`, { autoHideMs: 4500 });
     });
   };
   nativeAudioEl?.addEventListener("ended", onAudioEnded);
+  installMediaSessionTrackHandlers();
 
   return {
     render,
     connectAndLoad,
     dispose() {
+      clearErrorTimer();
+      clearMediaSessionTrackHandlers();
       listeners.delete(render);
       mediaAdapter.onState = null;
       nativeAudioEl?.removeEventListener("ended", onAudioEnded);
