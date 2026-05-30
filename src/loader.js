@@ -1,6 +1,7 @@
 const PLAYLET_LOADER_KEY = "__playletLoaderState";
 const DEFAULT_APP_FILE = "app.js";
 const LOADER_VERSION = "__PLAYLET_VERSION__";
+const INLINE_BOOT_KEY = "__playletInlinedBootPlaylet";
 
 function resolveBaseUrl() {
   const scriptUrl = new URL(import.meta.url);
@@ -33,6 +34,20 @@ async function loadPlayletApp() {
   state.baseUrl = baseUrl;
   state.appVersion = LOADER_VERSION;
 
+  const inlineBoot = window[INLINE_BOOT_KEY];
+  if (typeof inlineBoot === "function") {
+    state.loading = Promise.resolve(
+      inlineBoot({
+        baseUrl,
+        version: LOADER_VERSION,
+      })
+    ).catch((err) => {
+      state.loading = null;
+      throw err;
+    });
+    return state.loading;
+  }
+
   const appUrl = new URL(DEFAULT_APP_FILE, baseUrl);
   appUrl.searchParams.set("v", LOADER_VERSION);
 
@@ -54,7 +69,9 @@ async function loadPlayletApp() {
   return state.loading;
 }
 
-loadPlayletApp().catch((err) => {
-  console.error("[Playlet] Failed to load", err);
-  alert(`[Playlet] Failed to load: ${err.message}`);
+queueMicrotask(() => {
+  loadPlayletApp().catch((err) => {
+    console.error("[Playlet] Failed to load", err);
+    alert(`[Playlet] Failed to load: ${err.message}`);
+  });
 });

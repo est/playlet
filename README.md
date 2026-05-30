@@ -18,8 +18,7 @@ The rest is vibe coding history.
 
 ## How it works
 
-1. Save this to browser bookmark:
-   `javascript:import("https://est.github.io/playlet/loader.js")`
+1. Save this to browser bookmark: `javascript:import("https://est.github.io/playlet/loader.js")`
 2. Open DLNA index page, usually http://NAS-IP:8200/
 3. Click the saved bookmark
 
@@ -39,7 +38,7 @@ For v1.2
 
 - Tree browser with `+/-` expand/collapse (lazy-loaded by node)
 - Session playlist: add, remove, play from queue
-- Copy media URL from library rows and playlist rows
+- Copy media URL from library rows and playlist rows (`⧉`)
 - Auto-detect `rootDesc.xml`, with hidden advanced URL override
 - Scroll isolation for panel internals (better trackpad behavior on macOS)
 - Debug hooks:
@@ -72,14 +71,30 @@ npm run build
 npm run serve:dist
 ```
 
-`dist/` contains:
+Build outputs:
 
-- `loader.js` (bookmarklet entry)
-- `app.js` (main runtime)
-- `index.html` (minimalist GitHub Pages landing)
+- `dist/loader.js`: esbuild bundle + minified (single download path)
+- `dist/app.js`: copied source for fallback/local debug
+- `dist/index.html`: copied from editable `src/index.html`
+
+`src/index.html` is plain editable source. You can tweak page content/style directly there.
+
+## GitHub Pages deploy
+
+Workflow: `.github/workflows/pages.yml`
+
+- Trigger: push `main` or manual dispatch
+- Install: `npm ci`
+- Build: `npm run build`
+- Publish artifact: `dist/`
+
+Repository setting required:
+
+- Settings -> Pages -> Source: `GitHub Actions`
 
 ## Architecture notes
 
-- `src/loader.js`: minimal, versioned dynamic loader
+- `src/loader.js`: loader runtime + fallback import path
+- `src/entry-inline.js`: expose `bootPlaylet` for inline single-file load
+- `src/loader-inline-entry.js`: entry to ensure inline app + loader bundled together
 - `src/app.js`: DLNA SOAP client + DIDL parser + tree UI + playlist + media adapter
-- `HtmlMediaAdapter` is designed for extension to MSE/WebCodecs/Remote Playback adapters later
