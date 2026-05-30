@@ -20,10 +20,10 @@ The rest is vibe coding history.
 
 1. Save this to browser bookmark:
    `javascript:import("https://est.github.io/playlet/loader.js")`
-2. Open NAS DLNA index page
+2. Open DLNA index page, usually http://NAS-IP:8200/
 3. Click the saved bookmark
 
-`loader.js` functions:
+the .js interally do these
 
 1. Discover/load device description XML (`rootDesc.xml` or provided URL)
 2. Find `ContentDirectory` `controlURL`
@@ -31,6 +31,7 @@ The rest is vibe coding history.
 4. Parse `DIDL-Lite` results into containers/items
 5. Play item `res` URLs in an injected UI panel
 
+No ads, telemetry. Works offline once loaded.
 
 ## Features
 

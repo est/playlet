@@ -1,6 +1,6 @@
 const PLAYLET_LOADER_KEY = "__playletLoaderState";
 const DEFAULT_APP_FILE = "app.js";
-const LOADER_VERSION = "local-20260530-090535";
+const LOADER_VERSION = "local-20260530-092133";
 
 function resolveBaseUrl() {
   const scriptUrl = new URL(import.meta.url);

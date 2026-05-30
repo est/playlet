@@ -1,4 +1,4 @@
-/* Playlet local-20260530-090535 */
+/* Playlet local-20260530-092133 */
 const PLAYLET_ROOT_ID = "playlet-root";
 const PLAYLET_STYLE_ID = "playlet-style";
 const PLAYLET_RUNTIME_KEY = "__playletRuntime";
@@ -591,6 +591,9 @@ function createStyles() {
   width: 100%;
   margin-top: 7px;
 }
+#${PLAYLET_ROOT_ID} .playlet-vol-range {
+  width: 120px;
+}
 #${PLAYLET_ROOT_ID} .playlet-status {
   margin-top: 6px;
   font-size: 10px;
@@ -752,6 +755,13 @@ async function copyText(text) {
 }
 
 function createUi(root, mediaAdapter) {
+  const scrollState = {
+    tree: 0,
+    playlist: 0,
+  };
+  let lastTreeSignature = "";
+  let lastPlaylistSignature = "";
+
   function renderTree() {
     if (!state.service) {
       return '<div class="playlet-empty">Not connected. Auto-connect runs on boot.</div>';
@@ -773,9 +783,7 @@ function createUi(root, mediaAdapter) {
         const isContainer = node.kind === "container";
         const toggleText = isContainer ? (node.loading ? "…" : node.expanded ? "-" : "+") : "·";
         const canToggle = isContainer && !node.loading;
-        const sub = isContainer
-          ? `${node.childCount || 0} children`
-          : [node.artist, node.album].filter(Boolean).join(" · ") || node.className || "media item";
+        const sub = isContainer ? "" : [node.artist, node.album].filter(Boolean).join(" · ") || node.className || "media item";
 
         const isNow = state.nowPlaying && node.kind === "item" && state.nowPlaying.id === node.id ? "1" : "0";
 
@@ -784,13 +792,13 @@ function createUi(root, mediaAdapter) {
   <button class="playlet-twisty" data-action="toggle" data-node-id="${encodeNodeId(node.id)}" ${canToggle ? "" : "disabled"}>${toggleText}</button>
   <div class="playlet-row-main">
     <div class="playlet-row-title">${isContainer ? "📁" : "🎵"} ${escapeHtml(node.title)}</div>
-    <div class="playlet-row-sub">${escapeHtml(sub)}</div>
+    ${sub ? `<div class="playlet-row-sub">${escapeHtml(sub)}</div>` : ""}
   </div>
   <div class="playlet-row-actions">
     ${
       isContainer
         ? ""
-        : `<button class="playlet-icon-btn" data-kind="ghost" data-action="copy-url" data-node-id="${encodeNodeId(node.id)}" ${node.playable ? "" : "disabled"}>U</button>
+        : `<button class="playlet-icon-btn" data-kind="ghost" data-action="copy-url" data-node-id="${encodeNodeId(node.id)}" ${node.playable ? "" : "disabled"}>⧉</button>
            <button class="playlet-icon-btn" data-kind="ghost" data-action="add-playlist" data-node-id="${encodeNodeId(node.id)}" ${node.playable ? "" : "disabled"}>+</button>
            <button class="playlet-icon-btn" data-action="play-item" data-node-id="${encodeNodeId(node.id)}" ${node.playable ? "" : "disabled"}>▶</button>`
     }
@@ -816,7 +824,7 @@ function createUi(root, mediaAdapter) {
     <div class="playlet-row-sub">${escapeHtml(playlistRowSub(item))}</div>
   </div>
   <div class="playlet-row-actions">
-    <button class="playlet-icon-btn" data-kind="ghost" data-action="playlist-copy" data-playlist-id="${escapeHtml(item.id)}">U</button>
+    <button class="playlet-icon-btn" data-kind="ghost" data-action="playlist-copy" data-playlist-id="${escapeHtml(item.id)}">⧉</button>
     <button class="playlet-icon-btn" data-kind="ghost" data-action="playlist-remove" data-playlist-id="${escapeHtml(item.id)}">-</button>
     <button class="playlet-icon-btn" data-action="playlist-play" data-playlist-id="${escapeHtml(item.id)}">▶</button>
   </div>
@@ -828,6 +836,23 @@ function createUi(root, mediaAdapter) {
   function render() {
     const status = mediaAdapter.getStatus();
     const now = state.nowPlaying;
+    const duration = Number.isFinite(status.duration) && status.duration > 0 ? status.duration : 0;
+    const progressMax = duration || 1;
+    const progressValue = duration ? Math.max(0, Math.min(status.currentTime || 0, duration)) : 0;
+
+    const nextTreeSignature = treeFlatRows()
+      .map(({ node }) => `${node.id}:${node.expanded ? 1 : 0}:${node.loading ? 1 : 0}`)
+      .join("|");
+    const nextPlaylistSignature = state.playlist.map((x) => x.id).join("|");
+
+    const prevTree = root.querySelector(".playlet-tree");
+    const prevPlaylist = root.querySelector(".playlet-playlist");
+    if (prevTree && nextTreeSignature !== lastTreeSignature) {
+      scrollState.tree = prevTree.scrollTop;
+    }
+    if (prevPlaylist && nextPlaylistSignature !== lastPlaylistSignature) {
+      scrollState.playlist = prevPlaylist.scrollTop;
+    }
 
     root.innerHTML = `
 <div class="playlet-card">
@@ -869,8 +894,10 @@ function createUi(root, mediaAdapter) {
       <button class="playlet-btn" data-action="play-toggle" ${now ? "" : "disabled"}>${status.paused ? "Play" : "Pause"}</button>
       <button class="playlet-btn" data-kind="ghost" data-action="next" ${state.playlist.length ? "" : "disabled"}>Next</button>
       <span>${formatSeconds(status.currentTime)} / ${formatSeconds(status.duration)}</span>
+      <span>Vol</span>
+      <input class="playlet-vol-range" type="range" min="0" max="1" step="0.01" value="${Number.isFinite(status.volume) ? status.volume : 1}" data-action="volume" />
     </div>
-    <input class="playlet-range" type="range" min="0" max="1" step="0.01" value="${Number.isFinite(status.volume) ? status.volume : 1}" data-action="volume" />
+    <input class="playlet-range" type="range" min="0" max="${progressMax}" step="0.1" value="${progressValue}" data-action="seek" ${duration ? "" : "disabled"} />
     <div class="playlet-status">${escapeHtml(featureSummary(status.features))}</div>
   </div>
 
@@ -879,6 +906,14 @@ function createUi(root, mediaAdapter) {
 
     bindEvents();
     attachScrollIsolation(root);
+
+    const tree = root.querySelector(".playlet-tree");
+    const playlist = root.querySelector(".playlet-playlist");
+    if (tree) tree.scrollTop = scrollState.tree;
+    if (playlist) playlist.scrollTop = scrollState.playlist;
+
+    lastTreeSignature = nextTreeSignature;
+    lastPlaylistSignature = nextPlaylistSignature;
   }
 
   function attachScrollIsolation(rootEl) {
@@ -1135,6 +1170,13 @@ function createUi(root, mediaAdapter) {
 
     root.querySelector('[data-action="volume"]')?.addEventListener("input", (evt) => {
       mediaAdapter.setVolume(Number(evt.target.value));
+    });
+
+    root.querySelector('[data-action="seek"]')?.addEventListener("input", (evt) => {
+      const value = Number(evt.target.value);
+      if (Number.isFinite(value)) {
+        mediaAdapter.seek(value);
+      }
     });
 
     root.querySelectorAll('[data-action="toggle"][data-node-id]').forEach((btn) => {
