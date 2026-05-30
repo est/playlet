@@ -9,14 +9,20 @@ const state = {
   baseUrl: "",
   busy: false,
   descUrl: "",
+  showAdvanced: false,
   service: null,
-  stack: [],
-  entries: [],
+  serviceName: "",
+  treeNodes: {},
+  treeTick: 0,
+  playlist: [],
   nowPlaying: null,
+  nowPlayingPlaylistId: "",
+  toast: "",
   error: "",
 };
 
 const listeners = new Set();
+let toastTimer = null;
 
 function publishState() {
   for (const cb of listeners) cb(state);
@@ -25,6 +31,27 @@ function publishState() {
 function setState(next) {
   Object.assign(state, next);
   publishState();
+}
+
+function bumpTree() {
+  state.treeTick += 1;
+  publishState();
+}
+
+function clearToastTimer() {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+}
+
+function setToast(message, durationMs = 2000) {
+  clearToastTimer();
+  setState({ toast: message });
+  toastTimer = setTimeout(() => {
+    setState({ toast: "" });
+    toastTimer = null;
+  }, durationMs);
 }
 
 function escapeHtml(input) {
@@ -42,11 +69,6 @@ function normalizeUrl(url, base) {
   } catch {
     return url;
   }
-}
-
-function textOf(node, selector) {
-  const found = node.querySelector(selector);
-  return found ? found.textContent?.trim() ?? "" : "";
 }
 
 function firstElementByLocalName(node, localName) {
@@ -107,7 +129,6 @@ function pickPlayableResource(resources) {
     .map((res) => {
       const protocol = parseProtocolInfo(res.protocolInfo);
       let score = 0;
-
       if (protocol.protocol === "http-get") score += 4;
       if (protocol.mime.startsWith("audio/")) score += 4;
       if (protocol.mime === "audio/flac") score += 3;
@@ -115,15 +136,9 @@ function pickPlayableResource(resources) {
       if (protocol.mime === "audio/mpeg") score += 2;
       if (protocol.mime === "audio/x-wav") score += 2;
       if (protocol.flags["DLNA.ORG_OP"] && protocol.flags["DLNA.ORG_OP"] !== "00") score += 1;
-
-      return {
-        ...res,
-        protocol,
-        score,
-      };
+      return { ...res, protocol, score };
     })
     .sort((a, b) => b.score - a.score);
-
   return scored[0] || null;
 }
 
@@ -183,6 +198,7 @@ class DlnaClient {
     this.descBase = new URL(descUrl, location.href).href;
     this.controlUrl = "";
     this.serviceType = CONTENT_DIRECTORY_SERVICE;
+    this.serviceName = "";
     this.lastRequest = null;
     this.lastResponse = null;
   }
@@ -200,6 +216,7 @@ class DlnaClient {
       throw new Error(`Description XML parse failed: ${parseError.textContent?.trim() || "Unknown parser error"}`);
     }
 
+    this.serviceName = textByLocalName(doc, "friendlyName") || "DLNA Device";
     const serviceNodes = allElementsByLocalName(doc, "service");
     const target = serviceNodes.find((node) => textByLocalName(node, "serviceType") === CONTENT_DIRECTORY_SERVICE);
 
@@ -232,12 +249,7 @@ class DlnaClient {
   </s:Body>
 </s:Envelope>`;
 
-    this.lastRequest = {
-      url: this.controlUrl,
-      action,
-      objectId,
-      body,
-    };
+    this.lastRequest = { url: this.controlUrl, action, objectId, body };
 
     const res = await fetch(this.controlUrl, {
       method: "POST",
@@ -249,11 +261,7 @@ class DlnaClient {
     });
 
     const xml = await res.text();
-    this.lastResponse = {
-      status: res.status,
-      ok: res.ok,
-      xml,
-    };
+    this.lastResponse = { status: res.status, ok: res.ok, xml };
 
     if (!res.ok) {
       throw new Error(`Browse failed: ${res.status} ${res.statusText}`);
@@ -271,13 +279,9 @@ class DlnaClient {
     }
 
     const resultNode = firstElementByLocalName(doc, "Result");
+    if (!resultNode) return [];
 
-    if (!resultNode) {
-      return [];
-    }
-
-    const didl = resultNode.textContent || "";
-    return parseDidlEntries(didl, this.controlUrl);
+    return parseDidlEntries(resultNode.textContent || "", this.controlUrl);
   }
 }
 
@@ -293,14 +297,11 @@ class BaseMediaAdapter {
     };
   }
 
-  attach() {}
-
   playResource() {
     throw new Error("playResource() must be implemented");
   }
 
   pause() {}
-
   destroy() {}
 
   getStatus() {
@@ -310,6 +311,7 @@ class BaseMediaAdapter {
       paused: true,
       volume: 1,
       features: this.features,
+      error: "",
     };
   }
 }
@@ -338,13 +340,11 @@ class HtmlMediaAdapter extends BaseMediaAdapter {
   }
 
   emitState() {
-    if (!this.onState) return;
-    this.onState(this.getStatus());
+    if (this.onState) this.onState(this.getStatus());
   }
 
   async playResource(resource, metadata) {
     if (!resource?.url) throw new Error("No media URL to play");
-
     this.audio.src = resource.url;
 
     if (this.features.mediaSession && metadata) {
@@ -367,13 +367,6 @@ class HtmlMediaAdapter extends BaseMediaAdapter {
   async resume() {
     await this.audio.play();
     this.emitState();
-  }
-
-  seek(seconds) {
-    if (Number.isFinite(seconds)) {
-      this.audio.currentTime = Math.max(0, seconds);
-      this.emitState();
-    }
   }
 
   setVolume(volume) {
@@ -408,138 +401,233 @@ function createStyles() {
   style.textContent = `
 #${PLAYLET_ROOT_ID} {
   position: fixed;
-  inset: 16px 16px 16px auto;
-  width: min(420px, calc(100vw - 32px));
+  inset: 14px 14px 14px auto;
+  width: min(520px, calc(100vw - 28px));
   z-index: 2147483647;
-  color: #111;
+  color: #101111;
   font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  pointer-events: auto;
 }
 #${PLAYLET_ROOT_ID} .playlet-card {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 32px);
-  background: linear-gradient(165deg, #fdfdfd 0%, #f3f8ff 100%);
-  border: 1px solid #d9e6ff;
-  border-radius: 16px;
-  box-shadow: 0 20px 40px rgba(30, 60, 90, 0.18);
+  height: calc(100vh - 28px);
+  max-height: 940px;
+  background: linear-gradient(160deg, #ffffff 0%, #f5f7fa 100%);
+  border: 1px solid #d8dde8;
+  border-radius: 14px;
+  box-shadow: 0 22px 44px rgba(5, 14, 26, 0.2);
   overflow: hidden;
 }
 #${PLAYLET_ROOT_ID} .playlet-head {
-  padding: 10px 12px;
-  border-bottom: 1px solid #e3ecff;
+  padding: 10px;
+  border-bottom: 1px solid #dde4ef;
   background: #fff;
+}
+#${PLAYLET_ROOT_ID} .playlet-head-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
 }
 #${PLAYLET_ROOT_ID} .playlet-title {
   font-size: 14px;
   font-weight: 700;
+  letter-spacing: 0.02em;
 }
 #${PLAYLET_ROOT_ID} .playlet-meta {
-  font-size: 12px;
-  color: #5a6577;
-  margin-top: 4px;
+  font-size: 11px;
+  color: #4c5668;
 }
 #${PLAYLET_ROOT_ID} .playlet-inputs {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   margin-top: 8px;
 }
 #${PLAYLET_ROOT_ID} input,
-#${PLAYLET_ROOT_ID} button,
-#${PLAYLET_ROOT_ID} select {
+#${PLAYLET_ROOT_ID} button {
   font: inherit;
 }
 #${PLAYLET_ROOT_ID} .playlet-input {
   flex: 1;
   min-width: 0;
-  padding: 7px 8px;
-  border-radius: 8px;
-  border: 1px solid #c6d8ff;
+  padding: 6px 8px;
+  border-radius: 7px;
+  border: 1px solid #ced7e6;
   background: #fff;
 }
-#${PLAYLET_ROOT_ID} .playlet-btn {
-  padding: 7px 10px;
-  border-radius: 8px;
-  border: 1px solid #3f7ae0;
-  background: #3f7ae0;
+#${PLAYLET_ROOT_ID} .playlet-btn,
+#${PLAYLET_ROOT_ID} .playlet-icon-btn {
+  border-radius: 7px;
+  border: 1px solid #2d6cdf;
+  background: #2d6cdf;
   color: #fff;
   cursor: pointer;
 }
-#${PLAYLET_ROOT_ID} .playlet-btn[data-kind="ghost"] {
-  background: #fff;
-  color: #2f5ca9;
+#${PLAYLET_ROOT_ID} .playlet-btn {
+  padding: 6px 9px;
 }
-#${PLAYLET_ROOT_ID} .playlet-body {
+#${PLAYLET_ROOT_ID} .playlet-icon-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  line-height: 1;
+  font-weight: 700;
+}
+#${PLAYLET_ROOT_ID} .playlet-btn[data-kind="ghost"],
+#${PLAYLET_ROOT_ID} .playlet-icon-btn[data-kind="ghost"] {
+  color: #204a97;
+  border-color: #bed0f2;
+  background: #fff;
+}
+#${PLAYLET_ROOT_ID} .playlet-btn[disabled],
+#${PLAYLET_ROOT_ID} .playlet-icon-btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+#${PLAYLET_ROOT_ID} .playlet-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#${PLAYLET_ROOT_ID} .playlet-section-title {
+  padding: 6px 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: #566071;
+  border-top: 1px solid #edf1f6;
+  background: #fafbfd;
+}
+#${PLAYLET_ROOT_ID} .playlet-scroll-zone {
   overflow: auto;
-  min-height: 180px;
-  padding: 8px;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+#${PLAYLET_ROOT_ID} .playlet-tree,
+#${PLAYLET_ROOT_ID} .playlet-playlist {
+  padding: 7px;
+}
+#${PLAYLET_ROOT_ID} .playlet-tree {
+  flex: 1;
+  min-height: 0;
+}
+#${PLAYLET_ROOT_ID} .playlet-playlist {
+  height: 34%;
+  min-height: 92px;
 }
 #${PLAYLET_ROOT_ID} .playlet-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px;
-  margin-bottom: 4px;
-  border-radius: 8px;
+  gap: 6px;
+  padding: 4px 6px;
+  margin-bottom: 3px;
+  border-radius: 7px;
+  border: 1px solid #e7ebf2;
   background: #fff;
-  border: 1px solid #e5eeff;
+}
+#${PLAYLET_ROOT_ID} .playlet-row[data-now="1"] {
+  border-color: #73a3ff;
+  background: #f6f9ff;
 }
 #${PLAYLET_ROOT_ID} .playlet-row-main {
   min-width: 0;
 }
 #${PLAYLET_ROOT_ID} .playlet-row-title {
-  font-size: 13px;
+  font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 #${PLAYLET_ROOT_ID} .playlet-row-sub {
+  font-size: 10px;
+  color: #6a7486;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#${PLAYLET_ROOT_ID} .playlet-row-actions {
+  display: flex;
+  gap: 4px;
+}
+#${PLAYLET_ROOT_ID} .playlet-twisty {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 4px;
+  border: 1px solid #c9d6ec;
+  background: #fff;
   font-size: 11px;
-  color: #6d7889;
+  color: #2f4d80;
+  cursor: pointer;
+}
+#${PLAYLET_ROOT_ID} .playlet-twisty[disabled] {
+  opacity: 0.35;
+  cursor: default;
+}
+#${PLAYLET_ROOT_ID} .playlet-item-indent {
+  display: inline-block;
+  width: 10px;
+  height: 1px;
 }
 #${PLAYLET_ROOT_ID} .playlet-foot {
-  border-top: 1px solid #dde8ff;
+  border-top: 1px solid #dde4ef;
   background: #fff;
-  padding: 10px 12px;
+  padding: 9px 10px 10px;
 }
 #${PLAYLET_ROOT_ID} .playlet-now {
-  font-size: 12px;
+  font-size: 11px;
   margin-bottom: 8px;
 }
 #${PLAYLET_ROOT_ID} .playlet-controls {
   display: flex;
-  gap: 8px;
   align-items: center;
+  gap: 6px;
 }
 #${PLAYLET_ROOT_ID} .playlet-range {
   width: 100%;
+  margin-top: 7px;
 }
 #${PLAYLET_ROOT_ID} .playlet-status {
-  font-size: 11px;
-  color: #4f5b6d;
   margin-top: 6px;
+  font-size: 10px;
+  color: #4d586b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 #${PLAYLET_ROOT_ID} .playlet-error {
-  margin: 8px;
-  padding: 8px;
-  border-radius: 8px;
-  color: #7f1d1d;
-  border: 1px solid #fecaca;
-  background: #fee2e2;
-  font-size: 12px;
+  margin: 6px 10px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  border: 1px solid #f2b9b9;
+  color: #7a1b1b;
+  background: #fce9e9;
+  font-size: 11px;
+}
+#${PLAYLET_ROOT_ID} .playlet-toast {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  background: rgba(16, 19, 28, 0.94);
+  color: #fff;
+  padding: 6px 9px;
+  font-size: 11px;
+  border-radius: 7px;
+}
+#${PLAYLET_ROOT_ID} .playlet-empty {
+  color: #6a7486;
+  font-size: 11px;
+  padding: 7px;
 }
 `;
   document.head.appendChild(style);
 }
 
 function inferDefaultDescUrl() {
-  const candidates = [
-    "rootDesc.xml",
-    "description.xml",
-    "/rootDesc.xml",
-    "/description.xml",
-  ];
-
+  const candidates = ["rootDesc.xml", "description.xml", "/rootDesc.xml", "/description.xml"];
   for (const path of candidates) {
     try {
       return new URL(path, location.href).href;
@@ -547,7 +635,6 @@ function inferDefaultDescUrl() {
       continue;
     }
   }
-
   return location.href;
 }
 
@@ -572,44 +659,66 @@ function mountRoot() {
   return root;
 }
 
-function renderBreadcrumb() {
-  if (!state.stack.length) return "Root";
-  return ["Root", ...state.stack.map((x) => x.title)].join(" / ");
+function resetTree() {
+  state.treeNodes = {
+    "0": {
+      id: "0",
+      parentId: "",
+      kind: "container",
+      title: "Root",
+      childCount: 0,
+      expanded: true,
+      loading: false,
+      childrenLoaded: false,
+      childrenIds: [],
+    },
+  };
+  state.treeTick = 0;
 }
 
-function renderEntries() {
-  if (state.busy) {
-    return '<div class="playlet-row"><div class="playlet-row-title">Loading...</div></div>';
-  }
+function getTreeNode(id) {
+  return state.treeNodes[id] || null;
+}
 
-  if (!state.entries.length) {
-    return '<div class="playlet-row"><div class="playlet-row-title">No entries found</div></div>';
+function ensureTreeNode(node) {
+  if (!state.treeNodes[node.id]) {
+    state.treeNodes[node.id] = node;
+  } else {
+    state.treeNodes[node.id] = {
+      ...state.treeNodes[node.id],
+      ...node,
+    };
   }
+}
 
-  return state.entries
-    .map((entry, index) => {
-      if (entry.kind === "container") {
-        return `
-<div class="playlet-row" data-entry-index="${index}" data-entry-kind="container">
-  <div class="playlet-row-main">
-    <div class="playlet-row-title">📁 ${escapeHtml(entry.title)}</div>
-    <div class="playlet-row-sub">${entry.childCount} children</div>
-  </div>
-  <button class="playlet-btn" data-action="enter" data-index="${index}">Open</button>
-</div>`;
+function encodeNodeId(id) {
+  return encodeURIComponent(id);
+}
+
+function decodeNodeId(id) {
+  return decodeURIComponent(id);
+}
+
+function treeFlatRows() {
+  const out = [];
+
+  function walk(nodeId, depth) {
+    const node = getTreeNode(nodeId);
+    if (!node) return;
+
+    if (nodeId !== "0") {
+      out.push({ node, depth });
+    }
+
+    if (node.kind === "container" && node.expanded) {
+      for (const childId of node.childrenIds || []) {
+        walk(childId, depth + 1);
       }
+    }
+  }
 
-      const sub = [entry.artist, entry.album].filter(Boolean).join(" · ");
-      return `
-<div class="playlet-row" data-entry-index="${index}" data-entry-kind="item">
-  <div class="playlet-row-main">
-    <div class="playlet-row-title">🎵 ${escapeHtml(entry.title)}</div>
-    <div class="playlet-row-sub">${escapeHtml(sub || entry.className || "media item")}</div>
-  </div>
-  <button class="playlet-btn" data-action="play" data-index="${index}" ${entry.playable ? "" : "disabled"}>Play</button>
-</div>`;
-    })
-    .join("");
+  walk("0", -1);
+  return out;
 }
 
 function featureSummary(features) {
@@ -618,48 +727,370 @@ function featureSummary(features) {
     .join(" | ");
 }
 
+function playlistRowSub(item) {
+  const parts = [item.artist, item.album].filter(Boolean);
+  return parts.length ? parts.join(" · ") : item.url;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  if (!ok) throw new Error("copy command rejected");
+}
+
 function createUi(root, mediaAdapter) {
+  function renderTree() {
+    if (!state.service) {
+      return '<div class="playlet-empty">Not connected. Auto-connect runs on boot.</div>';
+    }
+
+    const rows = treeFlatRows();
+
+    if (!rows.length) {
+      const rootNode = getTreeNode("0");
+      if (rootNode?.loading || state.busy) {
+        return '<div class="playlet-empty">Loading media tree...</div>';
+      }
+      return '<div class="playlet-empty">No entries found</div>';
+    }
+
+    return rows
+      .map(({ node, depth }) => {
+        const indent = Math.max(0, depth) * 14;
+        const isContainer = node.kind === "container";
+        const toggleText = isContainer ? (node.loading ? "…" : node.expanded ? "-" : "+") : "·";
+        const canToggle = isContainer && !node.loading;
+        const sub = isContainer
+          ? `${node.childCount || 0} children`
+          : [node.artist, node.album].filter(Boolean).join(" · ") || node.className || "media item";
+
+        const isNow = state.nowPlaying && node.kind === "item" && state.nowPlaying.id === node.id ? "1" : "0";
+
+        return `
+<div class="playlet-row" data-now="${isNow}" style="padding-left:${6 + indent}px">
+  <button class="playlet-twisty" data-action="toggle" data-node-id="${encodeNodeId(node.id)}" ${canToggle ? "" : "disabled"}>${toggleText}</button>
+  <div class="playlet-row-main">
+    <div class="playlet-row-title">${isContainer ? "📁" : "🎵"} ${escapeHtml(node.title)}</div>
+    <div class="playlet-row-sub">${escapeHtml(sub)}</div>
+  </div>
+  <div class="playlet-row-actions">
+    ${
+      isContainer
+        ? ""
+        : `<button class="playlet-icon-btn" data-kind="ghost" data-action="copy-url" data-node-id="${encodeNodeId(node.id)}" ${node.playable ? "" : "disabled"}>U</button>
+           <button class="playlet-icon-btn" data-kind="ghost" data-action="add-playlist" data-node-id="${encodeNodeId(node.id)}" ${node.playable ? "" : "disabled"}>+</button>
+           <button class="playlet-icon-btn" data-action="play-item" data-node-id="${encodeNodeId(node.id)}" ${node.playable ? "" : "disabled"}>▶</button>`
+    }
+  </div>
+</div>`;
+      })
+      .join("");
+  }
+
+  function renderPlaylist() {
+    if (!state.playlist.length) {
+      return '<div class="playlet-empty">Playlist is empty. Use + on a track.</div>';
+    }
+
+    return state.playlist
+      .map((item, idx) => {
+        const isNow = item.id === state.nowPlayingPlaylistId ? "1" : "0";
+        return `
+<div class="playlet-row" data-now="${isNow}">
+  <span class="playlet-item-indent">${idx + 1}</span>
+  <div class="playlet-row-main">
+    <div class="playlet-row-title">${escapeHtml(item.title)}</div>
+    <div class="playlet-row-sub">${escapeHtml(playlistRowSub(item))}</div>
+  </div>
+  <div class="playlet-row-actions">
+    <button class="playlet-icon-btn" data-kind="ghost" data-action="playlist-copy" data-playlist-id="${escapeHtml(item.id)}">U</button>
+    <button class="playlet-icon-btn" data-kind="ghost" data-action="playlist-remove" data-playlist-id="${escapeHtml(item.id)}">-</button>
+    <button class="playlet-icon-btn" data-action="playlist-play" data-playlist-id="${escapeHtml(item.id)}">▶</button>
+  </div>
+</div>`;
+      })
+      .join("");
+  }
+
   function render() {
     const status = mediaAdapter.getStatus();
-    const descUrl = state.descUrl || "";
     const now = state.nowPlaying;
 
     root.innerHTML = `
 <div class="playlet-card">
   <div class="playlet-head">
-    <div class="playlet-title">Playlet</div>
-    <div class="playlet-meta">v${escapeHtml(state.version)} · ${escapeHtml(renderBreadcrumb())}</div>
-    <div class="playlet-inputs">
-      <input class="playlet-input" id="playlet-desc-url" value="${escapeHtml(descUrl)}" placeholder="rootDesc.xml URL" />
-      <button class="playlet-btn" data-action="connect">Connect</button>
+    <div class="playlet-head-top">
+      <div>
+        <div class="playlet-title">Playlet</div>
+        <div class="playlet-meta">${escapeHtml(state.serviceName || "Not connected")} · v${escapeHtml(state.version)}</div>
+      </div>
+      <div class="playlet-row-actions">
+        <button class="playlet-btn" data-kind="ghost" data-action="refresh" ${state.service ? "" : "disabled"}>Refresh</button>
+        <button class="playlet-btn" data-kind="ghost" data-action="root" ${state.service ? "" : "disabled"}>Root</button>
+        <button class="playlet-btn" data-kind="ghost" data-action="advanced">${state.showAdvanced ? "Hide" : "Set URL"}</button>
+      </div>
     </div>
-    <div class="playlet-inputs">
-      <button class="playlet-btn" data-kind="ghost" data-action="up" ${state.stack.length ? "" : "disabled"}>Up</button>
-      <button class="playlet-btn" data-kind="ghost" data-action="refresh" ${state.service ? "" : "disabled"}>Refresh</button>
-    </div>
+
+    ${
+      state.showAdvanced
+        ? `<div class="playlet-inputs">
+             <input class="playlet-input" id="playlet-desc-url" value="${escapeHtml(state.descUrl || "")}" placeholder="rootDesc.xml URL" />
+             <button class="playlet-btn" data-action="connect">Connect</button>
+           </div>`
+        : ""
+    }
   </div>
 
   ${state.error ? `<div class="playlet-error">${escapeHtml(state.error)}</div>` : ""}
 
-  <div class="playlet-body">
-    ${renderEntries()}
+  <div class="playlet-main">
+    <div class="playlet-section-title">Library Tree (+/-)</div>
+    <div class="playlet-tree playlet-scroll-zone" data-scroll-zone="tree">${renderTree()}</div>
+    <div class="playlet-section-title">Playlist (${state.playlist.length})</div>
+    <div class="playlet-playlist playlet-scroll-zone" data-scroll-zone="playlist">${renderPlaylist()}</div>
   </div>
 
   <div class="playlet-foot">
-    <div class="playlet-now">Now playing: ${escapeHtml(now?.title || "(none)")}</div>
+    <div class="playlet-now">Now: ${escapeHtml(now?.title || "(none)")}</div>
     <div class="playlet-controls">
-      <button class="playlet-btn" data-action="toggle" ${now ? "" : "disabled"}>${status.paused ? "Play" : "Pause"}</button>
+      <button class="playlet-btn" data-action="play-toggle" ${now ? "" : "disabled"}>${status.paused ? "Play" : "Pause"}</button>
+      <button class="playlet-btn" data-kind="ghost" data-action="next" ${state.playlist.length ? "" : "disabled"}>Next</button>
       <span>${formatSeconds(status.currentTime)} / ${formatSeconds(status.duration)}</span>
     </div>
     <input class="playlet-range" type="range" min="0" max="1" step="0.01" value="${Number.isFinite(status.volume) ? status.volume : 1}" data-action="volume" />
     <div class="playlet-status">${escapeHtml(featureSummary(status.features))}</div>
   </div>
+
+  ${state.toast ? `<div class="playlet-toast">${escapeHtml(state.toast)}</div>` : ""}
 </div>`;
 
     bindEvents();
+    attachScrollIsolation(root);
+  }
+
+  function attachScrollIsolation(rootEl) {
+    rootEl.querySelectorAll(".playlet-scroll-zone").forEach((zone) => {
+      zone.addEventListener(
+        "wheel",
+        (evt) => {
+          const el = evt.currentTarget;
+          const scrollable = el.scrollHeight > el.clientHeight + 1;
+          if (!scrollable) return;
+
+          const delta = evt.deltaY;
+          const top = el.scrollTop <= 0;
+          const bottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+          if ((delta < 0 && top) || (delta > 0 && bottom)) {
+            evt.preventDefault();
+            evt.stopPropagation();
+          }
+        },
+        { passive: false }
+      );
+    });
+  }
+
+  function findPlaylistItem(id) {
+    return state.playlist.find((x) => x.id === id) || null;
+  }
+
+  async function playNode(node, playlistId = "") {
+    if (!node?.bestResource?.url) return;
+
+    try {
+      await mediaAdapter.playResource(node.bestResource, {
+        title: node.title,
+        artist: node.artist,
+        album: node.album,
+      });
+      setState({
+        nowPlaying: {
+          id: node.id,
+          title: node.title,
+          artist: node.artist,
+          album: node.album,
+        },
+        nowPlayingPlaylistId: playlistId,
+        error: "",
+      });
+    } catch (err) {
+      setState({ error: `Play failed: ${err.message}` });
+    }
+  }
+
+  async function playPlaylistById(playlistId) {
+    const item = findPlaylistItem(playlistId);
+    if (!item) return;
+
+    const pseudoNode = {
+      id: item.sourceNodeId || item.id,
+      title: item.title,
+      artist: item.artist,
+      album: item.album,
+      bestResource: { url: item.url, protocolInfo: item.protocolInfo || "" },
+    };
+
+    await playNode(pseudoNode, item.id);
+  }
+
+  async function playNextInPlaylist() {
+    if (!state.playlist.length) return;
+
+    let nextIdx = 0;
+    if (state.nowPlayingPlaylistId) {
+      const currentIdx = state.playlist.findIndex((x) => x.id === state.nowPlayingPlaylistId);
+      if (currentIdx >= 0) {
+        nextIdx = (currentIdx + 1) % state.playlist.length;
+      }
+    }
+
+    await playPlaylistById(state.playlist[nextIdx].id);
+  }
+
+  function addNodeToPlaylist(node) {
+    if (!node?.bestResource?.url) return;
+    const item = {
+      id: `pl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      sourceNodeId: node.id,
+      title: node.title,
+      artist: node.artist || "",
+      album: node.album || "",
+      durationSeconds: node.durationSeconds || null,
+      url: node.bestResource.url,
+      protocolInfo: node.bestResource.protocolInfo || "",
+    };
+
+    state.playlist.push(item);
+    setState({ playlist: state.playlist, error: "" });
+    setToast("Added to playlist");
+  }
+
+  function removePlaylistItem(id) {
+    const idx = state.playlist.findIndex((x) => x.id === id);
+    if (idx < 0) return;
+
+    const [removed] = state.playlist.splice(idx, 1);
+    const patch = { playlist: state.playlist };
+    if (removed.id === state.nowPlayingPlaylistId) {
+      patch.nowPlayingPlaylistId = "";
+    }
+    setState(patch);
+  }
+
+  async function loadChildren(nodeId, force = false) {
+    if (!state.service) return;
+
+    const node = getTreeNode(nodeId);
+    if (!node || node.kind !== "container") return;
+    if (node.loading) return;
+    if (node.childrenLoaded && !force) return;
+
+    node.loading = true;
+    bumpTree();
+
+    try {
+      const entries = await state.service.browse(nodeId);
+      const childIds = [];
+      for (const entry of entries) {
+        ensureTreeNode({
+          id: entry.id,
+          parentId: nodeId,
+          kind: entry.kind,
+          title: entry.title,
+          childCount: entry.childCount || 0,
+          expanded: false,
+          loading: false,
+          childrenLoaded: false,
+          childrenIds: [],
+          playable: entry.playable || false,
+          bestResource: entry.bestResource || null,
+          artist: entry.artist || "",
+          album: entry.album || "",
+          className: entry.className || "",
+          durationSeconds: entry.durationSeconds || null,
+        });
+        childIds.push(entry.id);
+      }
+
+      node.childrenIds = childIds;
+      node.childrenLoaded = true;
+      node.loading = false;
+      node.childCount = childIds.length;
+      setState({ error: "", busy: false });
+      bumpTree();
+    } catch (err) {
+      node.loading = false;
+      setState({ busy: false, error: `Browse failed: ${err.message}` });
+      bumpTree();
+    }
+  }
+
+  async function refreshTree() {
+    const rootNode = getTreeNode("0");
+    if (!rootNode) return;
+    setState({ busy: true });
+    rootNode.childrenLoaded = false;
+    await loadChildren("0", true);
+  }
+
+  async function toggleNode(nodeId) {
+    const node = getTreeNode(nodeId);
+    if (!node || node.kind !== "container") return;
+
+    node.expanded = !node.expanded;
+    bumpTree();
+
+    if (node.expanded) {
+      await loadChildren(node.id);
+    }
+  }
+
+  async function connectAndLoad(descUrl, silentError = false) {
+    try {
+      setState({ busy: true, error: "", descUrl });
+      const client = await new DlnaClient(descUrl).init();
+      state.service = client;
+      state.serviceName = client.serviceName;
+      resetTree();
+      setState({
+        service: client,
+        serviceName: client.serviceName,
+        showAdvanced: false,
+        busy: false,
+        error: "",
+      });
+      await loadChildren("0");
+    } catch (err) {
+      setState({
+        busy: false,
+        service: null,
+        serviceName: "",
+        error: silentError ? "" : err.message,
+        showAdvanced: true,
+      });
+      if (silentError) {
+        setToast("Auto connect failed. Set rootDesc URL.");
+      }
+    }
   }
 
   function bindEvents() {
+    root.querySelector('[data-action="advanced"]')?.addEventListener("click", () => {
+      setState({ showAdvanced: !state.showAdvanced });
+    });
+
     root.querySelector('[data-action="connect"]')?.addEventListener("click", async () => {
       const input = root.querySelector("#playlet-desc-url");
       const value = input?.value?.trim();
@@ -667,21 +1098,24 @@ function createUi(root, mediaAdapter) {
         setState({ error: "Please enter rootDesc.xml URL" });
         return;
       }
-
       await connectAndLoad(value);
     });
 
     root.querySelector('[data-action="refresh"]')?.addEventListener("click", async () => {
-      await loadCurrent();
+      await refreshTree();
     });
 
-    root.querySelector('[data-action="up"]')?.addEventListener("click", async () => {
-      if (!state.stack.length) return;
-      state.stack.pop();
-      await loadCurrent();
+    root.querySelector('[data-action="root"]')?.addEventListener("click", async () => {
+      const rootNode = getTreeNode("0");
+      if (!rootNode) return;
+      rootNode.expanded = true;
+      bumpTree();
+      if (!rootNode.childrenLoaded) {
+        await loadChildren("0");
+      }
     });
 
-    root.querySelector('[data-action="toggle"]')?.addEventListener("click", async () => {
+    root.querySelector('[data-action="play-toggle"]')?.addEventListener("click", async () => {
       const status = mediaAdapter.getStatus();
       try {
         if (status.paused) {
@@ -694,65 +1128,79 @@ function createUi(root, mediaAdapter) {
       }
     });
 
-    root.querySelector('[data-action="volume"]')?.addEventListener("input", (evt) => {
-      const value = Number(evt.target.value);
-      mediaAdapter.setVolume(value);
+    root.querySelector('[data-action="next"]')?.addEventListener("click", async () => {
+      await playNextInPlaylist();
     });
 
-    root.querySelectorAll('[data-action="enter"]').forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const index = Number(btn.getAttribute("data-index"));
-        const entry = state.entries[index];
-        if (!entry || entry.kind !== "container") return;
+    root.querySelector('[data-action="volume"]')?.addEventListener("input", (evt) => {
+      mediaAdapter.setVolume(Number(evt.target.value));
+    });
 
-        state.stack.push({ id: entry.id, title: entry.title });
-        await loadCurrent();
+    root.querySelectorAll('[data-action="toggle"][data-node-id]').forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const nodeId = decodeNodeId(btn.getAttribute("data-node-id") || "");
+        await toggleNode(nodeId);
       });
     });
 
-    root.querySelectorAll('[data-action="play"]').forEach((btn) => {
+    root.querySelectorAll('[data-action="play-item"]').forEach((btn) => {
       btn.addEventListener("click", async () => {
-        const index = Number(btn.getAttribute("data-index"));
-        const entry = state.entries[index];
-        if (!entry || entry.kind !== "item" || !entry.bestResource) return;
+        const nodeId = decodeNodeId(btn.getAttribute("data-node-id") || "");
+        const node = getTreeNode(nodeId);
+        await playNode(node);
+      });
+    });
+
+    root.querySelectorAll('[data-action="add-playlist"]').forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const nodeId = decodeNodeId(btn.getAttribute("data-node-id") || "");
+        const node = getTreeNode(nodeId);
+        addNodeToPlaylist(node);
+      });
+    });
+
+    root.querySelectorAll('[data-action="copy-url"]').forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const nodeId = decodeNodeId(btn.getAttribute("data-node-id") || "");
+        const node = getTreeNode(nodeId);
+        const url = node?.bestResource?.url;
+        if (!url) return;
 
         try {
-          await mediaAdapter.playResource(entry.bestResource, {
-            title: entry.title,
-            artist: entry.artist,
-            album: entry.album,
-          });
-          setState({ nowPlaying: entry, error: "" });
+          await copyText(url);
+          setToast("Media URL copied");
         } catch (err) {
-          setState({ error: `Play failed: ${err.message}` });
+          setState({ error: `Copy failed: ${err.message}` });
         }
       });
     });
-  }
 
-  async function connectAndLoad(descUrl) {
-    try {
-      setState({ busy: true, error: "", descUrl });
-      const client = await new DlnaClient(descUrl).init();
-      state.service = client;
-      state.stack = [];
-      await loadCurrent();
-    } catch (err) {
-      setState({ busy: false, error: err.message, entries: [], service: null });
-    }
-  }
+    root.querySelectorAll('[data-action="playlist-remove"]').forEach((btn) => {
+      btn.addEventListener("click", () => {
+        removePlaylistItem(btn.getAttribute("data-playlist-id") || "");
+      });
+    });
 
-  async function loadCurrent() {
-    if (!state.service) return;
-    const currentId = state.stack.length ? state.stack[state.stack.length - 1].id : "0";
+    root.querySelectorAll('[data-action="playlist-play"]').forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await playPlaylistById(btn.getAttribute("data-playlist-id") || "");
+      });
+    });
 
-    try {
-      setState({ busy: true, error: "" });
-      const entries = await state.service.browse(currentId);
-      setState({ entries, busy: false, error: "" });
-    } catch (err) {
-      setState({ busy: false, error: `Browse failed: ${err.message}` });
-    }
+    root.querySelectorAll('[data-action="playlist-copy"]').forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-playlist-id") || "";
+        const item = findPlaylistItem(id);
+        if (!item?.url) return;
+
+        try {
+          await copyText(item.url);
+          setToast("Playlist URL copied");
+        } catch (err) {
+          setState({ error: `Copy failed: ${err.message}` });
+        }
+      });
+    });
   }
 
   listeners.add(render);
@@ -762,6 +1210,19 @@ function createUi(root, mediaAdapter) {
     render,
     connectAndLoad,
   };
+}
+
+function serializeTreeForDebug() {
+  return Object.values(state.treeNodes).map((node) => ({
+    id: node.id,
+    parentId: node.parentId,
+    kind: node.kind,
+    title: node.title,
+    expanded: node.expanded,
+    loading: node.loading,
+    childrenLoaded: node.childrenLoaded,
+    childrenCount: (node.childrenIds || []).length,
+  }));
 }
 
 function installDebug(runtime) {
@@ -775,6 +1236,12 @@ function installDebug(runtime) {
     getLastResponse() {
       return state.service?.lastResponse || null;
     },
+    getPlaylist() {
+      return JSON.parse(JSON.stringify(state.playlist));
+    },
+    getTreeState() {
+      return serializeTreeForDebug();
+    },
     getRuntime() {
       return runtime;
     },
@@ -786,13 +1253,21 @@ export async function bootPlaylet({ baseUrl, version }) {
     window[PLAYLET_RUNTIME_KEY].dispose();
   }
 
+  clearToastTimer();
+  resetTree();
+
   state.initialized = true;
   state.version = version || "dev";
   state.baseUrl = baseUrl || "";
-  state.error = "";
   state.busy = false;
-  state.entries = [];
-  state.stack = [];
+  state.showAdvanced = false;
+  state.service = null;
+  state.serviceName = "";
+  state.playlist = [];
+  state.nowPlaying = null;
+  state.nowPlayingPlaylistId = "";
+  state.toast = "";
+  state.error = "";
 
   createStyles();
   const root = mountRoot();
@@ -803,10 +1278,14 @@ export async function bootPlaylet({ baseUrl, version }) {
   setState({ descUrl: initialDesc });
   ui.render();
 
+  // Auto connect first, reveal advanced input only when failed.
+  await ui.connectAndLoad(initialDesc, true);
+
   const runtime = {
     version,
     baseUrl,
     dispose() {
+      clearToastTimer();
       listeners.clear();
       mediaAdapter.destroy();
       root.remove();
@@ -815,6 +1294,5 @@ export async function bootPlaylet({ baseUrl, version }) {
 
   window[PLAYLET_RUNTIME_KEY] = runtime;
   installDebug(runtime);
-
   return runtime;
 }
