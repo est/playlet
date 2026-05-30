@@ -1,0 +1,13 @@
+{
+  "name": "playlet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "clean": "rm -rf dist",
+    "dev": "node scripts/dev-server.mjs",
+    "serve:dist": "node scripts/dev-server.mjs --dist",
+    "check": "node scripts/check.mjs"
+  }
+}
