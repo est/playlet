@@ -117,7 +117,6 @@ npm run serve:dist
 Build outputs:
 
 - `dist/loader.js`: esbuild bundle + minified (single download path)
-- `dist/app.js`: copied source for fallback/local debug
 - `dist/index.html`: copied from editable `src/index.html`
 
 `src/index.html` is plain editable source. You can tweak page content/style directly there.
@@ -135,9 +134,9 @@ Repository setting required:
 
 - Settings -> Pages -> Source: `GitHub Actions`
 
-## Architecture notes
 
-- `src/loader.js`: loader runtime + fallback import path
-- `src/entry-inline.js`: expose `bootPlaylet` for inline single-file load
-- `src/loader-inline-entry.js`: entry to ensure inline app + loader bundled together
-- `src/app.js`: DLNA SOAP client + DIDL parser + tree UI + playlist + media adapter
+## Cost
+
+|   Date   |    model      |  input      |     cache     |  output  | total |
++----------+---------------+-------------+---------------+----------+-------|
+| 20250630 | gpt-5.3-codex | ¥1.75✕1.39  | ¥0.175✕28.14  | ¥14✕0.2  | ¥10.2 |
