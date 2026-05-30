@@ -37,19 +37,29 @@ No ads, telemetry. Works offline once loaded.
 For v1.2
 
 - Tree browser with `+/-` expand/collapse (lazy-loaded by node)
+- Folder hover hint on same line (`XX items`)
+- Folder quick add (`≡+`) adds playable tracks from current folder level only (no recursive deep scan)
 - `Library` tabs: `Tree | Search`
 - Search modes:
   - `DLNA`: use `ContentDirectory:Search` when server supports it
   - `Local: Tree`: search only loaded tree nodes
   - `Local: Full`: crawl full library locally, then search
 - Session playlist: add, remove, play from queue
+- Playlist clear button (`Clear`)
 - Playlist supports drag-drop reorder
+- Shuffle does real in-place playlist reorder (`Shuffle`)
+- Prev/Next follow current playlist order after shuffle
 - Copy media URL from library rows and playlist rows (`⧉`)
+- Search result rows support same actions as tree rows (`▶`, `+`, `☆/★`, `⧉`)
 - Favorites: single-track star (`☆/★`) with localStorage persistence
+- Only favorites/mode are persisted; playlist is session-only
 - Playback modes: all-loop (`∞`), single-loop (`1`)
+- MediaSession track controls wired: `previoustrack` / `nexttrack`
 - Auto-detect `rootDesc.xml`, with hidden advanced URL override
 - Scroll isolation for panel internals (better trackpad behavior on macOS)
 - Native `<audio controls>` player for reliable seek/progress behavior
+- Error bar supports manual dismiss (`×`) and auto-hide for transient failures (play/copy/search/etc.)
+- Runtime reuse on repeated inject with same base/version (avoid full teardown/rebuild)
 - Debug hooks:
   - `window.__playletDebug.getState()`
   - `window.__playletDebug.getLastRequest()`
@@ -93,6 +103,9 @@ This page uses an iframe + one-click inject button to simulate bookmarklet behav
 - iframe loads `/` (your real DLNA page via proxy)
 - it sets `?playlet_desc=http://127.0.0.1:8788/rootDesc.xml` on iframe URL
 - then executes `import("/playlet/loader.js")` inside iframe window
+- Debug toolbar includes:
+  - `Inject`: inject loader into iframe page
+  - `Fix Audio CORS`: manually attach audio `onerror` fallback (rewrite absolute DLNA media URL to local proxy origin and retry)
 
 ## Build
 
