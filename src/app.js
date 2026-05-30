@@ -5,8 +5,7 @@ const CONTENT_DIRECTORY_SERVICE = "urn:schemas-upnp-org:service:ContentDirectory
 const PLAYLET_STORAGE_KEY = "__playletPrefsV1";
 const MODE_LOOP_ALL = "loop_all";
 const MODE_LOOP_ONE = "loop_one";
-const MODE_SHUFFLE = "shuffle";
-const PLAY_MODES = [MODE_LOOP_ALL, MODE_LOOP_ONE, MODE_SHUFFLE];
+const PLAY_MODES = [MODE_LOOP_ALL, MODE_LOOP_ONE];
 
 const state = {
   initialized: false,
@@ -81,7 +80,6 @@ function loadPrefsFromStorage() {
 
 function modeLabel(mode) {
   if (mode === MODE_LOOP_ONE) return "1";
-  if (mode === MODE_SHUFFLE) return "⤮";
   return "∞";
 }
 
@@ -705,6 +703,19 @@ function createStyles() {
   gap: 6px;
   flex-wrap: wrap;
 }
+#${PLAYLET_ROOT_ID} .playlet-control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 4px;
+  margin-right: 2px;
+  border-right: 1px solid #dde4ef;
+}
+#${PLAYLET_ROOT_ID} .playlet-control-group:last-of-type {
+  border-right: 0;
+  padding-right: 0;
+  margin-right: 0;
+}
 #${PLAYLET_ROOT_ID} .playlet-now-inline {
   font-size: 11px;
   color: #334158;
@@ -914,16 +925,24 @@ function createUi(root, mediaAdapter) {
       <div class="playlet-tabs">
         <button class="playlet-tab" data-action="tab-playlist" data-role="tab-playlist">Playlist (0)</button>
         <button class="playlet-tab" data-action="tab-favorites" data-role="tab-favorites">Favorites (0)</button>
-        <button class="playlet-tab" data-action="playlist-clear" data-role="playlist-clear">Clear</button>
       </div>
     </div>
     <div class="playlet-playlist playlet-scroll-zone" data-role="playlist" data-scroll-zone="playlist"></div>
   </div>
   <div class="playlet-foot">
     <div class="playlet-controls">
-      <button class="playlet-btn" data-action="play-toggle">Play</button>
-      <button class="playlet-btn" data-kind="ghost" data-action="next">Next</button>
-      <button class="playlet-btn" data-kind="ghost" data-action="cycle-mode" title="play mode"></button>
+      <div class="playlet-control-group">
+        <button class="playlet-btn" data-action="play-toggle">Play</button>
+        <button class="playlet-btn" data-kind="ghost" data-action="prev">Prev</button>
+        <button class="playlet-btn" data-kind="ghost" data-action="next">Next</button>
+      </div>
+      <div class="playlet-control-group">
+        <button class="playlet-btn" data-kind="ghost" data-action="playlist-clear" data-role="playlist-clear">Clear</button>
+        <button class="playlet-btn" data-kind="ghost" data-action="shuffle-playlist" data-role="shuffle-playlist">Shuffle</button>
+      </div>
+      <div class="playlet-control-group">
+        <button class="playlet-btn" data-kind="ghost" data-action="cycle-mode" data-role="mode-btn" title="play mode"></button>
+      </div>
       <div class="playlet-now-inline" data-role="now"></div>
     </div>
     <div class="playlet-native-audio" data-role="native-audio"></div>
@@ -944,10 +963,13 @@ function createUi(root, mediaAdapter) {
     tabPlaylist: root.querySelector('[data-role="tab-playlist"]'),
     tabFavorites: root.querySelector('[data-role="tab-favorites"]'),
     playlistClearBtn: root.querySelector('[data-role="playlist-clear"]'),
+    shuffleBtn: root.querySelector('[data-role="shuffle-playlist"]'),
     playlist: root.querySelector('[data-role="playlist"]'),
     now: root.querySelector('[data-role="now"]'),
     playToggleBtn: root.querySelector('[data-action="play-toggle"]'),
+    prevBtn: root.querySelector('[data-action="prev"]'),
     nextBtn: root.querySelector('[data-action="next"]'),
+    modeBtn: root.querySelector('[data-role="mode-btn"]'),
     nativeAudioHost: root.querySelector('[data-role="native-audio"]'),
     status: root.querySelector('[data-role="status"]'),
     toast: root.querySelector('[data-role="toast"]'),
@@ -1212,6 +1234,8 @@ function createUi(root, mediaAdapter) {
     refs.tabPlaylist.dataset.active = state.listTab === "playlist" ? "1" : "0";
     refs.tabFavorites.dataset.active = state.listTab === "favorites" ? "1" : "0";
     refs.playlistClearBtn.disabled = !state.playlist.length;
+    refs.shuffleBtn.disabled = state.playlist.length < 2;
+    if (refs.modeBtn) refs.modeBtn.textContent = modeLabel(state.playMode);
   }
 
   function renderPlayerOnly() {
@@ -1219,9 +1243,8 @@ function createUi(root, mediaAdapter) {
     refs.now.textContent = `Now: ${state.nowPlaying?.title || "(none)"}`;
     refs.playToggleBtn.disabled = !state.nowPlaying;
     refs.playToggleBtn.textContent = status.paused ? "Play" : "Pause";
+    refs.prevBtn.disabled = !state.playlist.length;
     refs.nextBtn.disabled = !state.playlist.length;
-    const modeBtn = root.querySelector('[data-action="cycle-mode"]');
-    if (modeBtn) modeBtn.textContent = modeLabel(state.playMode);
     refs.status.textContent = featureSummary(status.features);
 
     if (refs.nativeAudioHost && typeof mediaAdapter.getElement === "function") {
@@ -1317,21 +1340,26 @@ function createUi(root, mediaAdapter) {
     if (state.nowPlayingPlaylistId) {
       const currentIdx = state.playlist.findIndex((x) => x.id === state.nowPlayingPlaylistId);
       if (currentIdx >= 0) {
-        if (state.playMode === MODE_SHUFFLE) {
-          if (state.playlist.length === 1) {
-            nextIdx = currentIdx;
-          } else {
-            do {
-              nextIdx = Math.floor(Math.random() * state.playlist.length);
-            } while (nextIdx === currentIdx);
-          }
-        } else {
-          nextIdx = (currentIdx + 1) % state.playlist.length;
-        }
+        nextIdx = (currentIdx + 1) % state.playlist.length;
       }
     }
 
     await playPlaylistById(state.playlist[nextIdx].id);
+  }
+
+  async function playPrevInPlaylist() {
+    if (!state.playlist.length) return;
+    if (!state.nowPlayingPlaylistId) {
+      await playPlaylistById(state.playlist[0].id);
+      return;
+    }
+    const currentIdx = state.playlist.findIndex((x) => x.id === state.nowPlayingPlaylistId);
+    if (currentIdx < 0) {
+      await playPlaylistById(state.playlist[0].id);
+      return;
+    }
+    const prevIdx = (currentIdx - 1 + state.playlist.length) % state.playlist.length;
+    await playPlaylistById(state.playlist[prevIdx].id);
   }
 
   function addNodeToPlaylist(node) {
@@ -1406,6 +1434,23 @@ function createUi(root, mediaAdapter) {
     if (state.nowPlayingPlaylistId) patch.nowPlayingPlaylistId = "";
     setState(patch);
     setToast("Playlist cleared");
+  }
+
+  function shufflePlaylist() {
+    if (state.playlist.length < 2) return;
+    const currentId = state.nowPlayingPlaylistId;
+    for (let i = state.playlist.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = state.playlist[i];
+      state.playlist[i] = state.playlist[j];
+      state.playlist[j] = tmp;
+    }
+    if (currentId && state.playlist.some((x) => x.id === currentId)) {
+      setState({ playlist: state.playlist, nowPlayingPlaylistId: currentId });
+    } else {
+      setState({ playlist: state.playlist });
+    }
+    setToast("Playlist shuffled");
   }
 
   function toggleStar(nodeId) {
@@ -1584,8 +1629,16 @@ function createUi(root, mediaAdapter) {
       }
       return;
     }
+    if (action === "prev") {
+      await playPrevInPlaylist();
+      return;
+    }
     if (action === "next") {
       await playNextInPlaylist();
+      return;
+    }
+    if (action === "shuffle-playlist") {
+      shufflePlaylist();
       return;
     }
     if (action === "cycle-mode") {

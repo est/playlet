@@ -237,10 +237,52 @@ function playletDebugHtml(host) {
   <script>
     const frame = document.getElementById('frame');
     const input = document.getElementById('desc');
+
+    function installAudioProxyFix(w) {
+      try {
+        if (!w || w.__playletDebugAudioFixInstalled) return;
+        const AudioProto = w.Audio && w.Audio.prototype;
+        if (!AudioProto) return;
+        const desc = Object.getOwnPropertyDescriptor(AudioProto, 'src');
+        if (!desc || typeof desc.set !== 'function' || typeof desc.get !== 'function') return;
+        const retryKey = '__playletProxyRetrySrc';
+        const originalSet = desc.set;
+        const originalGet = desc.get;
+
+        Object.defineProperty(AudioProto, 'src', {
+          configurable: true,
+          enumerable: desc.enumerable,
+          get() {
+            return originalGet.call(this);
+          },
+          set(value) {
+            const onError = () => {
+              try {
+                const current = this.currentSrc || originalGet.call(this) || value;
+                if (!current || this[retryKey] === current) return;
+                const u = new URL(current, w.location.href);
+                if (u.origin === w.location.origin) return;
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+                this[retryKey] = current;
+                const fixed = w.location.origin + u.pathname + u.search + u.hash;
+                originalSet.call(this, fixed);
+                this.play().catch(() => {});
+              } catch {}
+            };
+            this.addEventListener('error', onError, { once: true });
+            return originalSet.call(this, value);
+          }
+        });
+
+        w.__playletDebugAudioFixInstalled = true;
+      } catch {}
+    }
+
     document.getElementById('inject').addEventListener('click', async () => {
       const desc = input.value.trim();
       const w = frame.contentWindow;
       if (!w) return;
+      installAudioProxyFix(w);
       w.history.replaceState({}, '', '?playlet_desc=' + encodeURIComponent(desc));
       try {
         await w.eval('import("${PLAYLET_PREFIX}/loader.js")');
