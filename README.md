@@ -1,6 +1,6 @@
 # Playlet
 
-Playlet is a bookmarklet-first DLNA page enhancer.
+Playlet plays songs/media on any DLNA server
 Open your NAS media index page, run the bookmarklet, and get an inline player UI without installing a native client.
 
 ## Story
@@ -15,88 +15,16 @@ Suddently I had an idea: a DLNA client involves speaking HTTP anyway, and the DL
 
 The rest is vibe coding history.
 
-## Quick Start
+## how it works
 
-1. Build the bookmarklet payload:
+1. save this `javascript:import("https://est.github.io/playlet/loader.js")` to browser bookmark
+2. open NAS DLNA index page
+3. open the bookmark
 
-```bash
-npm run build
-```
+the `loader.js` provide functions for:
 
-2. Open `dist/bookmarklet.txt` and copy the full `javascript:...` URL.
-3. Create a browser bookmark named `Playlet`.
-4. Paste the copied URL as the bookmark target.
-5. Navigate to your NAS DLNA index page and click the bookmark.
-
-## How It Works
-
-- `scripts/build-bookmarklet.mjs` reads source modules and emits:
-  - `dist/playlet.module.js` (runtime module)
-  - `dist/bookmarklet.txt` (tiny loader bookmarklet)
-- The payload runs in the context of the current NAS page, so it can read the page HTML and reuse same-origin requests.
-- `src/parser.js` extracts folder and media links from index-like HTML and returns:
-  - supported parse results (folders + tracks), or
-  - fallback diagnostics when parsing confidence is too low.
-- `src/playlet.js` injects a docked UI panel into the page and wires transport controls.
-- `src/player-state.js` manages queue/current index/play state in a small, testable state container.
-- The loader runs once per page via `window.__PLAYLET_BOOKMARKLET_INJECTED__`.
-- The module marks execution via `window.__PLAYLET_MODULE_RAN__`.
-
-## Project Layout
-
-- `src/parser.js`: strict link parser and normalization.
-- `src/player-state.js`: queue/playback state operations.
-- `src/playlet.js`: UI mount, rendering, controls, and global `window.Playlet.init()`.
-- `scripts/build-bookmarklet.mjs`: bookmarklet bundle/encode step.
-- `test/*.test.js`: parser, state, and build verification.
-- `fixtures/*.html`: parser fixtures for supported/unsupported layouts.
-- `dist/playlet.module.js`: generated module runtime.
-- `dist/bookmarklet.txt`: generated loader bookmarklet.
-
-## Development
-
-Prerequisites:
-- Node.js 22+ (uses built-in `node:test`)
-
-Install:
-- No dependencies required.
-
-Common workflow:
-
-```bash
-npm test
-npm run build
-```
-
-During dev:
-- update source under `src/`
-- add/adjust tests in `test/`
-- run `npm test` first
-- run `npm run build` to refresh `dist/bookmarklet.txt`
-
-## Build Output
-
-- `npm run build` writes:
-  - `dist/playlet.module.js` containing the Playlet runtime.
-  - `dist/bookmarklet.txt` containing a single `javascript:...` loader URL.
-- Copy that full line into a browser bookmark target.
-
-## Real Data vs Fixtures
-
-- `fixtures/supported.html` and `fixtures/unsupported.html` are only test fixtures for parser tests.
-- At runtime, Playlet parses the actual current NAS/DLNA page DOM (`document.documentElement.outerHTML`).
-- Tracks shown in the UI come from real `<a href="...">` media links found on your DLNA page.
-- If the page layout is unsupported, Playlet shows diagnostics instead of fake tracks.
-
-## Current v1 Features
-
-- Strict parsing of DLNA-like index pages with links.
-- Track/folder extraction with URL normalization and track dedupe.
-- Inline player panel with queue, play/pause, prev/next, and remove from queue.
-- Unsupported-page fallback with diagnostics payload for future parser adapters.
-
-## Known Limits (v1)
-
-- Parser is intentionally strict and may reject unusual NAS index markup.
-- No persistent settings or server profiles yet.
-- No search, transcoding, or multi-device sync.
+1. Discover/load device description XML (`rootDesc.xml` or provided URL)
+2. Find `ContentDirectory` `controlURL`
+3. Send `Browse` SOAP requests (ObjectID, BrowseDirectChildren)
+4. Parse `DIDL-Lite` results into containers/items
+5. Play item res URLs in the UI
