@@ -9,7 +9,7 @@ I have a NAS, it provides a DLNA server to host my song collections.
 
 But I hate install a DLNA compatible app on phone/macOS. It's hard to find a good one.
 
-So on a sunday I decided to build a client myself. While evaluating tech stack and distribution options, I tried to ask ChatGPT whether browsers provide SSDP/uPNP natively, turns out no. I even tried to build [a Chrome App with `chrome.socket`](https://github.com/est/push2air) 13 years ago but went nowhere. You have to choose native UI, electron (boo!), or some command line utility, which are mostly very boring.
+So on a Saturday I decided to build a client myself. While evaluating tech stack and distribution options, I tried to ask ChatGPT whether browsers provide SSDP/uPNP natively, turns out no. I even tried to build [a Chrome App with `chrome.socket`](https://github.com/est/push2air) 13 years ago but went nowhere. You have to choose native UI, electron (boo!), or some command line utility, which are mostly very boring.
 
 Suddently I had an idea: a DLNA client involves speaking HTTP anyway, and the DLNA server already has a web server. There's an ancient lesser-known trick called "bookmarklet". I could inject a small `.js` into the ugly DLNA index page, then do `fetch()` calls and render a nice player inline. No UDP, no CORS, no bullshit.
 
@@ -30,13 +30,17 @@ npm run build
 
 ## How It Works
 
-- `scripts/build-bookmarklet.mjs` reads source modules and emits one encoded `javascript:` payload.
+- `scripts/build-bookmarklet.mjs` reads source modules and emits:
+  - `dist/playlet.module.js` (runtime module)
+  - `dist/bookmarklet.txt` (tiny loader bookmarklet)
 - The payload runs in the context of the current NAS page, so it can read the page HTML and reuse same-origin requests.
 - `src/parser.js` extracts folder and media links from index-like HTML and returns:
   - supported parse results (folders + tracks), or
   - fallback diagnostics when parsing confidence is too low.
 - `src/playlet.js` injects a docked UI panel into the page and wires transport controls.
 - `src/player-state.js` manages queue/current index/play state in a small, testable state container.
+- The loader runs once per page via `window.__PLAYLET_BOOKMARKLET_INJECTED__`.
+- The module marks execution via `window.__PLAYLET_MODULE_RAN__`.
 
 ## Project Layout
 
@@ -46,7 +50,8 @@ npm run build
 - `scripts/build-bookmarklet.mjs`: bookmarklet bundle/encode step.
 - `test/*.test.js`: parser, state, and build verification.
 - `fixtures/*.html`: parser fixtures for supported/unsupported layouts.
-- `dist/bookmarklet.txt`: generated bookmarklet string.
+- `dist/playlet.module.js`: generated module runtime.
+- `dist/bookmarklet.txt`: generated loader bookmarklet.
 
 ## Development
 
@@ -72,8 +77,16 @@ During dev:
 ## Build Output
 
 - `npm run build` writes:
-  - `dist/bookmarklet.txt` containing a single `javascript:...` URL.
+  - `dist/playlet.module.js` containing the Playlet runtime.
+  - `dist/bookmarklet.txt` containing a single `javascript:...` loader URL.
 - Copy that full line into a browser bookmark target.
+
+## Real Data vs Fixtures
+
+- `fixtures/supported.html` and `fixtures/unsupported.html` are only test fixtures for parser tests.
+- At runtime, Playlet parses the actual current NAS/DLNA page DOM (`document.documentElement.outerHTML`).
+- Tracks shown in the UI come from real `<a href="...">` media links found on your DLNA page.
+- If the page layout is unsupported, Playlet shows diagnostics instead of fake tracks.
 
 ## Current v1 Features
 
