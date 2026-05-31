@@ -120,6 +120,37 @@ Build outputs:
 
 `src/index.html` is plain editable source. You can tweak page content/style directly there.
 
+## Architecture
+
+Current runtime layering:
+
+- `src/app.js`: runtime orchestrator only (`bootPlaylet`, runtime reuse/dispose, initial state/bootstrap)
+- `src/ui/panel.js`: Playlet panel UI, event wiring, tree/search/playlist rendering
+- `src/ui/styles.js`: injected styles
+- `src/domain/dlna.js`: DLNA SOAP + DIDL parsing/search helpers
+- `src/domain/playlist.js`: playlist/favorites/play-mode domain logic
+- `src/infra/media.js`: media adapter (`HtmlMediaAdapter`)
+- `src/infra/storage.js`: localStorage prefs I/O
+- `src/core/*`: constants and lightweight store
+
+Data flow convention:
+
+1. UI event -> domain/infra action
+2. update `state` via orchestrator helpers
+3. render from `state`
+
+Runtime lifecycle:
+
+- First inject builds runtime and auto-connects
+- Re-inject with same `baseUrl + version` reuses runtime and calls `reconnect()`
+- Different version/base disposes old runtime and rebuilds
+
+Debug and smoke checks:
+
+- Runtime/debug hooks: `window.__playletDebug.*`
+- Unit/smoke tests: `npm run test`
+- Structure/boundary checks: `npm run check`
+
 ## GitHub Pages deploy
 
 Workflow: `.github/workflows/pages.yml`
