@@ -231,58 +231,12 @@ function playletDebugHtml(host) {
     <label>Desc</label>
     <input id="desc" size="52" value="${descHint}" />
     <button id="inject">Inject</button>
-    <button id="fix-audio">Fix Audio CORS</button>
-    <span class="hint" id="fix-status">audio fix: off</span>
+    <span class="hint">inject <code>import('/playlet/loader.js')</code> in iframe</span>
   </div>
   <iframe id="frame" src="${iframeSrc}"></iframe>
   <script>
     const frame = document.getElementById('frame');
     const input = document.getElementById('desc');
-    const fixStatus = document.getElementById('fix-status');
-
-    function bindAudioFixManually() {
-      try {
-        const w = frame.contentWindow;
-        if (!w) {
-          fixStatus.textContent = 'audio fix: failed';
-          return;
-        }
-        const fixScript =
-          "(function(){" +
-          "if(window.__playletDebugAudioFixInstalled)return true;" +
-          "var RETRY_KEY='__playletProxyRetrySrc';" +
-          "var bind=function(audio){" +
-          "if(!audio||audio.__playletAudioFixBound)return;" +
-          "audio.__playletAudioFixBound=true;" +
-          "audio.onerror=function(e){" +
-          "var el=e&&e.target;if(!el)return;" +
-          "var current=el.currentSrc||el.src||'';" +
-          "if(!current||el[RETRY_KEY]===current)return;" +
-          "try{" +
-          "var u=new URL(current,location.href);" +
-          "if(u.origin===location.origin)return;" +
-          "if(u.protocol!=='http:'&&u.protocol!=='https:')return;" +
-          "el[RETRY_KEY]=current;" +
-          "var fixed=location.origin+u.pathname+u.search+u.hash;" +
-          "console.log('[playlet-debug] audio fallback',current,'->',fixed);" +
-          "el.src=fixed;" +
-          "el.play().catch(function(){});" +
-          "}catch(_e){}" +
-          "};" +
-          "};" +
-          "bind(document.querySelector('audio'));" +
-          "window.__playletDebugAudioFixTimer=window.__playletDebugAudioFixTimer||setInterval(function(){bind(document.querySelector('audio'));},1000);" +
-          "window.__playletDebugAudioFixInstalled=true;" +
-          "return true;" +
-          "})();";
-        w.eval(fixScript);
-        fixStatus.textContent = 'audio fix: on';
-      } catch {
-        fixStatus.textContent = 'audio fix: failed';
-      }
-    }
-
-    document.getElementById('fix-audio').addEventListener('click', bindAudioFixManually);
 
     document.getElementById('inject').addEventListener('click', async () => {
       const desc = input.value.trim();
@@ -291,7 +245,6 @@ function playletDebugHtml(host) {
       w.history.replaceState({}, '', '?playlet_desc=' + encodeURIComponent(desc));
       try {
         await w.eval('import("${PLAYLET_PREFIX}/loader.js")');
-        fixStatus.textContent = 'audio fix: off';
       } catch (e) {
         alert('inject failed: ' + e.message);
       }

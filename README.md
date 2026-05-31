@@ -105,7 +105,6 @@ This page uses an iframe + one-click inject button to simulate bookmarklet behav
 - then executes `import("/playlet/loader.js")` inside iframe window
 - Debug toolbar includes:
   - `Inject`: inject loader into iframe page
-  - `Fix Audio CORS`: manually attach audio `onerror` fallback (rewrite absolute DLNA media URL to local proxy origin and retry)
 
 ## Build
 

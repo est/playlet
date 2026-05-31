@@ -448,7 +448,6 @@ class HtmlMediaAdapter extends BaseMediaAdapter {
     this.onState = onState;
     this.audio = new Audio();
     this.audio.preload = "metadata";
-    this.audio.crossOrigin = "anonymous";
     this.audio.controls = true;
     this.audio.playsInline = true;
 
