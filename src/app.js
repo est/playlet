@@ -1,17 +1,38 @@
-const PLAYLET_ROOT_ID = "playlet-root";
-const PLAYLET_STYLE_ID = "playlet-style";
-const PLAYLET_RUNTIME_KEY = "__playletRuntime";
-const CONTENT_DIRECTORY_SERVICE = "urn:schemas-upnp-org:service:ContentDirectory:1";
-const PLAYLET_STORAGE_KEY = "__playletPrefsV1";
-const MODE_LOOP_ALL = "loop_all";
-const MODE_LOOP_ONE = "loop_one";
-const PLAY_MODES = [MODE_LOOP_ALL, MODE_LOOP_ONE];
-const SEARCH_MODE_DLNA = "dlna";
-const SEARCH_MODE_LOCAL_TREE = "local_tree";
-const SEARCH_MODE_LOCAL_FULL = "local_full";
-const SEARCH_MODES = [SEARCH_MODE_DLNA, SEARCH_MODE_LOCAL_TREE, SEARCH_MODE_LOCAL_FULL];
+import {
+  MODE_LOOP_ALL,
+  MODE_LOOP_ONE,
+  PLAYLET_ROOT_ID,
+  PLAYLET_RUNTIME_KEY,
+  SEARCH_MODE_DLNA,
+  SEARCH_MODE_LOCAL_TREE,
+  SEARCH_MODE_LOCAL_FULL,
+} from "./core/constants.js";
+import { createStore } from "./core/store.js";
+import { loadPrefsFromStorage, savePrefsToStorage } from "./infra/storage.js";
+import {
+  DlnaClient,
+  buildDlnaSearchCriteria as buildDlnaSearchCriteriaDomain,
+  textMatchesKeyword as textMatchesKeywordDomain,
+} from "./domain/dlna.js";
+import {
+  addNodeToPlaylist as addNodeToPlaylistDomain,
+  clearPlaylist as clearPlaylistDomain,
+  cycleMode as cycleModeDomain,
+  findPlaylistItem as findPlaylistItemDomain,
+  getFavoriteItems as getFavoriteItemsDomain,
+  getNextPlaylistId,
+  getPrevPlaylistId,
+  makePlaylistItemFromTrack as makePlaylistItemFromTrackDomain,
+  playlistRowSub as playlistRowSubDomain,
+  removePlaylistItem as removePlaylistItemDomain,
+  reorderPlaylist as reorderPlaylistDomain,
+  shufflePlaylist as shufflePlaylistDomain,
+  toggleStar as toggleStarDomain,
+} from "./domain/playlist.js";
+import { HtmlMediaAdapter } from "./infra/media.js";
+import { createStyles } from "./ui/styles.js";
 
-const state = {
+const initialState = {
   initialized: false,
   version: "dev",
   baseUrl: "",
@@ -39,54 +60,21 @@ const state = {
   error: "",
 };
 
+const store = createStore(initialState);
+const state = store.getState();
 const listeners = new Set();
 let toastTimer = null;
 
-function publishState() {
-  for (const cb of listeners) cb(state);
-}
+store.subscribe((nextState) => {
+  for (const cb of listeners) cb(nextState);
+});
 
 function setState(next) {
-  Object.assign(state, next);
-  publishState();
+  store.setState(next);
 }
 
-function safeLocalStorageGet(key) {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function safeLocalStorageSet(key, value) {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    // ignore storage quota/permission failures
-  }
-}
-
-function savePrefsToStorage() {
-  const payload = {
-    playMode: state.playMode,
-    stars: state.stars,
-  };
-  safeLocalStorageSet(PLAYLET_STORAGE_KEY, JSON.stringify(payload));
-}
-
-function loadPrefsFromStorage() {
-  const raw = safeLocalStorageGet(PLAYLET_STORAGE_KEY);
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      playMode: PLAY_MODES.includes(parsed?.playMode) ? parsed.playMode : MODE_LOOP_ALL,
-      stars: parsed?.stars && typeof parsed.stars === "object" ? parsed.stars : {},
-    };
-  } catch {
-    return null;
-  }
+function mutateState(mutator) {
+  store.mutate(mutator);
 }
 
 function modeLabel(mode) {
@@ -95,8 +83,9 @@ function modeLabel(mode) {
 }
 
 function bumpTree() {
-  state.treeTick += 1;
-  publishState();
+  mutateState((draft) => {
+    draft.treeTick += 1;
+  });
 }
 
 function clearToastTimer() {
@@ -114,797 +103,6 @@ function setToast(message, durationMs = 2000) {
     toastTimer = null;
   }, durationMs);
 }
-
-function escapeHtml(input) {
-  return String(input)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function normalizeUrl(url, base) {
-  try {
-    return new URL(url, base).href;
-  } catch {
-    return url;
-  }
-}
-
-function firstElementByLocalName(node, localName) {
-  const byNs = node.getElementsByTagNameNS ? node.getElementsByTagNameNS("*", localName) : [];
-  if (byNs && byNs.length) return byNs[0];
-  const byTag = node.getElementsByTagName ? node.getElementsByTagName(localName) : [];
-  return byTag && byTag.length ? byTag[0] : null;
-}
-
-function allElementsByLocalName(node, localName) {
-  const list = node.getElementsByTagNameNS ? node.getElementsByTagNameNS("*", localName) : [];
-  if (list && list.length) return Array.from(list);
-  const fallback = node.getElementsByTagName ? node.getElementsByTagName(localName) : [];
-  return Array.from(fallback || []);
-}
-
-function textByLocalName(node, localName) {
-  const el = firstElementByLocalName(node, localName);
-  return el?.textContent?.trim() || "";
-}
-
-function parseDurationToSeconds(input) {
-  if (!input) return null;
-  const match = input.match(/^(\d+):(\d+):(\d+)(?:\.\d+)?$/);
-  if (!match) return null;
-  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
-}
-
-function formatSeconds(value) {
-  if (!Number.isFinite(value) || value < 0) return "--:--";
-  const total = Math.floor(value);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) {
-    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  }
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-function parseProtocolInfo(info) {
-  const [protocol = "", network = "", mime = "", extras = ""] = String(info || "").split(":");
-  const flags = Object.fromEntries(
-    extras
-      .split(";")
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .map((entry) => {
-        const [k, v = ""] = entry.split("=");
-        return [k, v];
-      })
-  );
-  return { protocol, network, mime, flags, raw: info || "" };
-}
-
-function pickPlayableResource(resources) {
-  const scored = resources
-    .map((res) => {
-      const protocol = parseProtocolInfo(res.protocolInfo);
-      let score = 0;
-      if (protocol.protocol === "http-get") score += 4;
-      if (protocol.mime.startsWith("audio/")) score += 4;
-      if (protocol.mime === "audio/flac") score += 3;
-      if (protocol.mime === "audio/mp4") score += 3;
-      if (protocol.mime === "audio/mpeg") score += 2;
-      if (protocol.mime === "audio/x-wav") score += 2;
-      if (protocol.flags["DLNA.ORG_OP"] && protocol.flags["DLNA.ORG_OP"] !== "00") score += 1;
-      return { ...res, protocol, score };
-    })
-    .sort((a, b) => b.score - a.score);
-  return scored[0] || null;
-}
-
-function parseDidlEntries(xmlText, baseUrl) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(xmlText, "application/xml");
-  const parseError = doc.querySelector("parsererror");
-  if (parseError) {
-    throw new Error(`DIDL parse failed: ${parseError.textContent?.trim() || "Unknown parser error"}`);
-  }
-
-  const containers = allElementsByLocalName(doc, "container").map((node) => ({
-    kind: "container",
-    id: node.getAttribute("id") || "",
-    parentId: node.getAttribute("parentID") || "",
-    title: textByLocalName(node, "title") || "(untitled folder)",
-    childCount: Number(node.getAttribute("childCount") || "0") || 0,
-  }));
-
-  const items = allElementsByLocalName(doc, "item").map((node) => {
-    const resources = allElementsByLocalName(node, "res")
-      .map((resNode) => {
-        const url = (resNode.textContent || "").trim();
-        if (!url) return null;
-        return {
-          url: normalizeUrl(url, baseUrl),
-          protocolInfo: resNode.getAttribute("protocolInfo") || "",
-          bitrate: Number(resNode.getAttribute("bitrate") || "0") || null,
-          duration: resNode.getAttribute("duration") || "",
-        };
-      })
-      .filter(Boolean);
-
-    const best = pickPlayableResource(resources);
-
-    return {
-      kind: "item",
-      id: node.getAttribute("id") || "",
-      parentId: node.getAttribute("parentID") || "",
-      title: textByLocalName(node, "title") || "(untitled track)",
-      artist: textByLocalName(node, "artist"),
-      album: textByLocalName(node, "album"),
-      className: textByLocalName(node, "class"),
-      resources,
-      playable: Boolean(best),
-      bestResource: best,
-      durationSeconds: parseDurationToSeconds(best?.duration || ""),
-    };
-  });
-
-  return [...containers, ...items];
-}
-
-class DlnaClient {
-  constructor(descUrl) {
-    this.descUrl = descUrl;
-    this.descBase = new URL(descUrl, location.href).href;
-    this.controlUrl = "";
-    this.serviceType = CONTENT_DIRECTORY_SERVICE;
-    this.serviceName = "";
-    this.lastRequest = null;
-    this.lastResponse = null;
-    this.searchAvailable = true;
-  }
-
-  async init() {
-    const res = await fetch(this.descBase);
-    if (!res.ok) {
-      throw new Error(`Description fetch failed: ${res.status} ${res.statusText}`);
-    }
-
-    const text = await res.text();
-    const doc = new DOMParser().parseFromString(text, "application/xml");
-    const parseError = doc.querySelector("parsererror");
-    if (parseError) {
-      throw new Error(`Description XML parse failed: ${parseError.textContent?.trim() || "Unknown parser error"}`);
-    }
-
-    this.serviceName = textByLocalName(doc, "friendlyName") || "DLNA Device";
-    const serviceNodes = allElementsByLocalName(doc, "service");
-    const target = serviceNodes.find((node) => textByLocalName(node, "serviceType") === CONTENT_DIRECTORY_SERVICE);
-
-    if (!target) {
-      throw new Error("ContentDirectory service not found in device description");
-    }
-
-    const rawControlUrl = textByLocalName(target, "controlURL");
-    if (!rawControlUrl) {
-      throw new Error("ContentDirectory controlURL is empty");
-    }
-
-    this.controlUrl = normalizeUrl(rawControlUrl, this.descBase);
-    return this;
-  }
-
-  async browse(objectId = "0", start = 0, count = 200) {
-    const action = "Browse";
-    const body = `<?xml version="1.0" encoding="utf-8"?>
-<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-  <s:Body>
-    <u:Browse xmlns:u="${this.serviceType}">
-      <ObjectID>${escapeHtml(objectId)}</ObjectID>
-      <BrowseFlag>BrowseDirectChildren</BrowseFlag>
-      <Filter>*</Filter>
-      <StartingIndex>${start}</StartingIndex>
-      <RequestedCount>${count}</RequestedCount>
-      <SortCriteria></SortCriteria>
-    </u:Browse>
-  </s:Body>
-</s:Envelope>`;
-
-    this.lastRequest = { url: this.controlUrl, action, objectId, body };
-
-    const res = await fetch(this.controlUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": 'text/xml; charset="utf-8"',
-        SOAPAction: `"${this.serviceType}#${action}"`,
-      },
-      body,
-    });
-
-    const xml = await res.text();
-    this.lastResponse = { status: res.status, ok: res.ok, xml };
-
-    if (!res.ok) {
-      throw new Error(`Browse failed: ${res.status} ${res.statusText}`);
-    }
-
-    const doc = new DOMParser().parseFromString(xml, "application/xml");
-    const parseError = doc.querySelector("parsererror");
-    if (parseError) {
-      throw new Error(`SOAP parse failed: ${parseError.textContent?.trim() || "Unknown parser error"}`);
-    }
-
-    const fault = firstElementByLocalName(doc, "Fault");
-    if (fault) {
-      throw new Error(`SOAP Fault: ${fault.textContent?.trim() || "Unknown fault"}`);
-    }
-
-    const resultNode = firstElementByLocalName(doc, "Result");
-    if (!resultNode) return [];
-
-    return parseDidlEntries(resultNode.textContent || "", this.controlUrl);
-  }
-
-  async search(containerId = "0", searchCriteria = "", start = 0, count = 200, sortCriteria = "") {
-    if (this.searchAvailable === false) {
-      const err = new Error("DLNA Search action not available");
-      err.code = "SEARCH_UNAVAILABLE";
-      throw err;
-    }
-
-    const action = "Search";
-    const body = `<?xml version="1.0" encoding="utf-8"?>
-<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-  <s:Body>
-    <u:Search xmlns:u="${this.serviceType}">
-      <ContainerID>${escapeHtml(containerId)}</ContainerID>
-      <SearchCriteria>${escapeHtml(searchCriteria)}</SearchCriteria>
-      <Filter>*</Filter>
-      <StartingIndex>${start}</StartingIndex>
-      <RequestedCount>${count}</RequestedCount>
-      <SortCriteria>${escapeHtml(sortCriteria)}</SortCriteria>
-    </u:Search>
-  </s:Body>
-</s:Envelope>`;
-
-    this.lastRequest = { url: this.controlUrl, action, containerId, searchCriteria, body };
-
-    const res = await fetch(this.controlUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": 'text/xml; charset="utf-8"',
-        SOAPAction: `"${this.serviceType}#${action}"`,
-      },
-      body,
-    });
-
-    const xml = await res.text();
-    this.lastResponse = { status: res.status, ok: res.ok, xml };
-
-    const doc = new DOMParser().parseFromString(xml, "application/xml");
-    const parseError = doc.querySelector("parsererror");
-    if (parseError) {
-      throw new Error(`SOAP parse failed: ${parseError.textContent?.trim() || "Unknown parser error"}`);
-    }
-
-    const fault = firstElementByLocalName(doc, "Fault");
-    if (fault) {
-      const faultText = fault.textContent?.trim() || "Unknown fault";
-      if (faultText.includes("401") || faultText.toLowerCase().includes("invalid action")) {
-        this.searchAvailable = false;
-        const err = new Error("DLNA Search action not available");
-        err.code = "SEARCH_UNAVAILABLE";
-        throw err;
-      }
-      throw new Error(`SOAP Fault: ${faultText}`);
-    }
-
-    if (!res.ok) {
-      throw new Error(`Search failed: ${res.status} ${res.statusText}`);
-    }
-
-    const resultNode = firstElementByLocalName(doc, "Result");
-    if (!resultNode) return [];
-
-    return parseDidlEntries(resultNode.textContent || "", this.controlUrl);
-  }
-}
-
-class BaseMediaAdapter {
-  constructor() {
-    this.features = {
-      pip: false,
-      mediaSession: false,
-      remotePlayback: false,
-      castCandidate: false,
-      mse: false,
-      webCodecs: false,
-    };
-  }
-
-  playResource() {
-    throw new Error("playResource() must be implemented");
-  }
-
-  pause() {}
-  destroy() {}
-
-  getStatus() {
-    return {
-      currentTime: 0,
-      duration: NaN,
-      paused: true,
-      volume: 1,
-      features: this.features,
-      error: "",
-    };
-  }
-}
-
-class HtmlMediaAdapter extends BaseMediaAdapter {
-  constructor(onState) {
-    super();
-    this.onState = onState;
-    this.audio = new Audio();
-    this.audio.preload = "metadata";
-    this.audio.controls = true;
-    this.audio.playsInline = true;
-
-    this.features = {
-      pip: typeof document.pictureInPictureEnabled === "boolean",
-      mediaSession: "mediaSession" in navigator,
-      remotePlayback: "remote" in this.audio,
-      castCandidate: "PresentationRequest" in window,
-      mse: "MediaSource" in window,
-      webCodecs: "VideoDecoder" in window,
-    };
-
-    this.boundEmit = this.emitState.bind(this);
-    ["play", "pause", "ended", "volumechange", "loadedmetadata", "error"].forEach((evt) => {
-      this.audio.addEventListener(evt, this.boundEmit);
-    });
-  }
-
-  emitState() {
-    if (this.onState) this.onState(this.getStatus());
-  }
-
-  async playResource(resource, metadata) {
-    if (!resource?.url) throw new Error("No media URL to play");
-    this.audio.src = resource.url;
-
-    if (this.features.mediaSession && metadata) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: metadata.title || "Unknown",
-        artist: metadata.artist || "",
-        album: metadata.album || "",
-      });
-    }
-
-    await this.audio.play();
-    this.emitState();
-  }
-
-  pause() {
-    this.audio.pause();
-    this.emitState();
-  }
-
-  async resume() {
-    await this.audio.play();
-    this.emitState();
-  }
-
-  setVolume(volume) {
-    this.audio.volume = Math.max(0, Math.min(1, volume));
-    this.emitState();
-  }
-
-  getStatus() {
-    return {
-      currentTime: this.audio.currentTime || 0,
-      duration: this.audio.duration,
-      paused: this.audio.paused,
-      volume: this.audio.volume,
-      features: this.features,
-      error: this.audio.error ? `MediaError code ${this.audio.error.code}` : "",
-    };
-  }
-
-  getElement() {
-    return this.audio;
-  }
-
-  destroy() {
-    this.audio.pause();
-    this.audio.src = "";
-    ["play", "pause", "ended", "volumechange", "loadedmetadata", "error"].forEach((evt) => {
-      this.audio.removeEventListener(evt, this.boundEmit);
-    });
-  }
-}
-
-function createStyles() {
-  if (document.getElementById(PLAYLET_STYLE_ID)) return;
-  const style = document.createElement("style");
-  style.id = PLAYLET_STYLE_ID;
-  style.textContent = `
-#${PLAYLET_ROOT_ID} {
-  position: fixed;
-  inset: 14px 14px 14px auto;
-  width: min(520px, calc(100vw - 28px));
-  z-index: 2147483647;
-  color: #101111;
-  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  pointer-events: auto;
-}
-#${PLAYLET_ROOT_ID} .playlet-card {
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 28px);
-  max-height: 940px;
-  background: linear-gradient(160deg, #ffffff 0%, #f5f7fa 100%);
-  border: 1px solid #d8dde8;
-  border-radius: 14px;
-  box-shadow: 0 22px 44px rgba(5, 14, 26, 0.2);
-  overflow: hidden;
-}
-#${PLAYLET_ROOT_ID} .playlet-head {
-  padding: 10px;
-  border-bottom: 1px solid #dde4ef;
-  background: #fff;
-}
-#${PLAYLET_ROOT_ID} .playlet-head-top {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  align-items: center;
-}
-#${PLAYLET_ROOT_ID} .playlet-title {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-#${PLAYLET_ROOT_ID} .playlet-meta {
-  font-size: 11px;
-  color: #4c5668;
-}
-#${PLAYLET_ROOT_ID} .playlet-inputs {
-  display: flex;
-  gap: 6px;
-  margin-top: 8px;
-}
-#${PLAYLET_ROOT_ID} input,
-#${PLAYLET_ROOT_ID} button {
-  font: inherit;
-}
-#${PLAYLET_ROOT_ID} .playlet-input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  border-radius: 7px;
-  border: 1px solid #ced7e6;
-  background: #fff;
-}
-#${PLAYLET_ROOT_ID} .playlet-btn,
-#${PLAYLET_ROOT_ID} .playlet-icon-btn {
-  border-radius: 7px;
-  border: 1px solid #2d6cdf;
-  background: #2d6cdf;
-  color: #fff;
-  cursor: pointer;
-}
-#${PLAYLET_ROOT_ID} .playlet-row.dragging {
-  opacity: 0.45;
-}
-#${PLAYLET_ROOT_ID} .playlet-row.drop-target {
-  outline: 2px dashed #7ca4ec;
-  outline-offset: 1px;
-}
-#${PLAYLET_ROOT_ID} .playlet-btn {
-  padding: 6px 9px;
-}
-#${PLAYLET_ROOT_ID} .playlet-icon-btn {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  line-height: 1;
-  font-weight: 700;
-}
-#${PLAYLET_ROOT_ID} .playlet-btn[data-kind="ghost"],
-#${PLAYLET_ROOT_ID} .playlet-icon-btn[data-kind="ghost"] {
-  color: #204a97;
-  border-color: #bed0f2;
-  background: #fff;
-}
-#${PLAYLET_ROOT_ID} .playlet-btn[disabled],
-#${PLAYLET_ROOT_ID} .playlet-icon-btn[disabled] {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-#${PLAYLET_ROOT_ID} .playlet-main {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-#${PLAYLET_ROOT_ID} .playlet-section-title {
-  padding: 6px 10px;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: #566071;
-  border-top: 1px solid #edf1f6;
-  background: #fafbfd;
-}
-#${PLAYLET_ROOT_ID} .playlet-scroll-zone {
-  overflow: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-}
-#${PLAYLET_ROOT_ID} .playlet-tree,
-#${PLAYLET_ROOT_ID} .playlet-playlist {
-  padding: 7px;
-}
-#${PLAYLET_ROOT_ID} .playlet-tree-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-#${PLAYLET_ROOT_ID} .playlet-tree {
-  flex: 1;
-  min-height: 0;
-}
-#${PLAYLET_ROOT_ID} .playlet-library-panel {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-#${PLAYLET_ROOT_ID} .playlet-search-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-#${PLAYLET_ROOT_ID} .playlet-search-bar {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-#${PLAYLET_ROOT_ID} .playlet-search-input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  border-radius: 7px;
-  border: 1px solid #ced7e6;
-  background: #fff;
-}
-#${PLAYLET_ROOT_ID} .playlet-search-meta {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  color: #5d6a82;
-  font-size: 10px;
-}
-#${PLAYLET_ROOT_ID} .playlet-playlist {
-  height: 34%;
-  min-height: 92px;
-}
-#${PLAYLET_ROOT_ID} .playlet-tabs {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-#${PLAYLET_ROOT_ID} .playlet-tab {
-  border: 1px solid #bed0f2;
-  color: #204a97;
-  background: #fff;
-  border-radius: 999px;
-  padding: 2px 8px;
-  font-size: 10px;
-  cursor: pointer;
-}
-#${PLAYLET_ROOT_ID} .playlet-tab[data-active="1"] {
-  background: #2d6cdf;
-  border-color: #2d6cdf;
-  color: #fff;
-}
-#${PLAYLET_ROOT_ID} .playlet-row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  margin-bottom: 3px;
-  border-radius: 7px;
-  border: 1px solid #e7ebf2;
-  background: #fff;
-}
-#${PLAYLET_ROOT_ID} .playlet-row[data-now="1"] {
-  border-color: #73a3ff;
-  background: #f6f9ff;
-}
-#${PLAYLET_ROOT_ID} .playlet-row-main {
-  min-width: 0;
-}
-#${PLAYLET_ROOT_ID} .playlet-row-title {
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-#${PLAYLET_ROOT_ID} .playlet-row-sub {
-  font-size: 10px;
-  color: #6a7486;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-#${PLAYLET_ROOT_ID} .playlet-folder-count {
-  margin-left: 6px;
-  font-size: 10px;
-  color: #6a7486;
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"]:hover .playlet-folder-count,
-#${PLAYLET_ROOT_ID} .playlet-row[data-kind="container"]:focus-within .playlet-folder-count {
-  opacity: 1;
-}
-#${PLAYLET_ROOT_ID} .playlet-row-actions {
-  display: flex;
-  gap: 4px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease;
-}
-#${PLAYLET_ROOT_ID} .playlet-row:hover .playlet-row-actions,
-#${PLAYLET_ROOT_ID} .playlet-row:focus-within .playlet-row-actions,
-#${PLAYLET_ROOT_ID} .playlet-row[data-now="1"] .playlet-row-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-@media (hover: none), (pointer: coarse) {
-  #${PLAYLET_ROOT_ID} .playlet-row-actions {
-    opacity: 1;
-    pointer-events: auto;
-  }
-}
-#${PLAYLET_ROOT_ID} .playlet-twisty {
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border-radius: 4px;
-  border: 1px solid #c9d6ec;
-  background: #fff;
-  font-size: 11px;
-  color: #2f4d80;
-  cursor: pointer;
-}
-#${PLAYLET_ROOT_ID} .playlet-twisty[disabled] {
-  opacity: 0.35;
-  cursor: default;
-}
-#${PLAYLET_ROOT_ID} .playlet-item-indent {
-  display: inline-block;
-  width: 10px;
-  height: 1px;
-}
-#${PLAYLET_ROOT_ID} .playlet-track-index {
-  display: inline-block;
-  width: 24px;
-  text-align: right;
-  padding-right: 2px;
-  font-variant-numeric: tabular-nums;
-  color: #53617a;
-}
-#${PLAYLET_ROOT_ID} .playlet-foot {
-  border-top: 1px solid #dde4ef;
-  background: #fff;
-  padding: 9px 10px 10px;
-}
-#${PLAYLET_ROOT_ID} .playlet-now {
-  font-size: 11px;
-  margin-bottom: 8px;
-}
-#${PLAYLET_ROOT_ID} .playlet-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-#${PLAYLET_ROOT_ID} .playlet-control-group {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding-right: 4px;
-  margin-right: 2px;
-  border-right: 1px solid #dde4ef;
-}
-#${PLAYLET_ROOT_ID} .playlet-control-group:last-of-type {
-  border-right: 0;
-  padding-right: 0;
-  margin-right: 0;
-}
-#${PLAYLET_ROOT_ID} .playlet-now-inline {
-  font-size: 11px;
-  color: #334158;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-  max-width: 52%;
-}
-#${PLAYLET_ROOT_ID} .playlet-range {
-  width: 100%;
-  margin-top: 7px;
-}
-#${PLAYLET_ROOT_ID} .playlet-vol-range {
-  width: 120px;
-}
-#${PLAYLET_ROOT_ID} .playlet-native-audio audio {
-  width: 100%;
-  margin-top: 8px;
-}
-#${PLAYLET_ROOT_ID} .playlet-status {
-  margin-top: 6px;
-  font-size: 10px;
-  color: #4d586b;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-#${PLAYLET_ROOT_ID} .playlet-error {
-  margin: 6px 10px;
-  padding: 7px 8px;
-  border-radius: 7px;
-  border: 1px solid #f2b9b9;
-  color: #7a1b1b;
-  background: #fce9e9;
-  font-size: 11px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-#${PLAYLET_ROOT_ID} .playlet-error-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-#${PLAYLET_ROOT_ID} .playlet-error-close {
-  border: 1px solid #e39e9e;
-  background: #fff6f6;
-  color: #7a1b1b;
-  border-radius: 6px;
-  width: 20px;
-  height: 20px;
-  line-height: 1;
-  padding: 0;
-  cursor: pointer;
-}
-#${PLAYLET_ROOT_ID} .playlet-toast {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  background: rgba(16, 19, 28, 0.94);
-  color: #fff;
-  padding: 6px 9px;
-  font-size: 11px;
-  border-radius: 7px;
-}
-#${PLAYLET_ROOT_ID} .playlet-empty {
-  color: #6a7486;
-  font-size: 11px;
-  padding: 7px;
-}
-`;
-  document.head.appendChild(style);
-}
-
 function inferDefaultDescUrl() {
   const candidates = ["rootDesc.xml", "description.xml", "/rootDesc.xml", "/description.xml"];
   for (const path of candidates) {
@@ -970,34 +168,18 @@ function ensureTreeNode(node) {
   }
 }
 
-function encodeNodeId(id) {
-  return encodeURIComponent(id);
-}
-
-function decodeNodeId(id) {
-  return decodeURIComponent(id);
-}
-
 function searchModeLabel(mode) {
   if (mode === SEARCH_MODE_LOCAL_TREE) return "Local: Tree";
   if (mode === SEARCH_MODE_LOCAL_FULL) return "Local: Full";
   return "DLNA";
 }
 
-function escapeSearchValue(input) {
-  return String(input || "").replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-}
-
 function buildDlnaSearchCriteria(keyword) {
-  const q = escapeSearchValue(keyword);
-  return `upnp:class derivedfrom "object.item.audioItem" and (dc:title contains "${q}" or upnp:artist contains "${q}" or upnp:album contains "${q}")`;
+  return buildDlnaSearchCriteriaDomain(keyword);
 }
 
 function textMatchesKeyword(node, keyword) {
-  const q = String(keyword || "").trim().toLowerCase();
-  if (!q) return false;
-  const fields = [node.title, node.artist, node.album, node.className];
-  return fields.some((x) => String(x || "").toLowerCase().includes(q));
+  return textMatchesKeywordDomain(node, keyword);
 }
 
 function treeFlatRows() {
@@ -1029,8 +211,7 @@ function featureSummary(features) {
 }
 
 function playlistRowSub(item) {
-  const parts = [item.artist, item.album].filter(Boolean);
-  return parts.length ? parts.join(" · ") : item.url;
+  return playlistRowSubDomain(item);
 }
 
 async function copyText(text) {
@@ -1495,7 +676,7 @@ function createUi(root, mediaAdapter) {
   }
 
   function getFavoriteItems() {
-    return state.playlist.filter((item) => state.stars[item.sourceNodeId || item.id]);
+    return getFavoriteItemsDomain(state);
   }
 
   function renderFavoritesRows() {
@@ -1603,7 +784,7 @@ function createUi(root, mediaAdapter) {
   }
 
   function findPlaylistItem(id) {
-    return state.playlist.find((x) => x.id === id) || null;
+    return findPlaylistItemDomain(state, id);
   }
 
   function findSearchNode(id) {
@@ -1650,53 +831,19 @@ function createUi(root, mediaAdapter) {
   }
 
   async function playNextInPlaylist() {
-    if (!state.playlist.length) return;
-
-    if (state.playMode === MODE_LOOP_ONE && state.nowPlayingPlaylistId) {
-      await playPlaylistById(state.nowPlayingPlaylistId);
-      return;
-    }
-
-    let nextIdx = 0;
-    if (state.nowPlayingPlaylistId) {
-      const currentIdx = state.playlist.findIndex((x) => x.id === state.nowPlayingPlaylistId);
-      if (currentIdx >= 0) {
-        nextIdx = (currentIdx + 1) % state.playlist.length;
-      }
-    }
-
-    await playPlaylistById(state.playlist[nextIdx].id);
+    const nextId = getNextPlaylistId(state);
+    if (!nextId) return;
+    await playPlaylistById(nextId);
   }
 
   async function playPrevInPlaylist() {
-    if (!state.playlist.length) return;
-    if (!state.nowPlayingPlaylistId) {
-      await playPlaylistById(state.playlist[0].id);
-      return;
-    }
-    const currentIdx = state.playlist.findIndex((x) => x.id === state.nowPlayingPlaylistId);
-    if (currentIdx < 0) {
-      await playPlaylistById(state.playlist[0].id);
-      return;
-    }
-    const prevIdx = (currentIdx - 1 + state.playlist.length) % state.playlist.length;
-    await playPlaylistById(state.playlist[prevIdx].id);
+    const prevId = getPrevPlaylistId(state);
+    if (!prevId) return;
+    await playPlaylistById(prevId);
   }
 
   function addNodeToPlaylist(node) {
-    if (!node?.bestResource?.url) return;
-    const item = {
-      id: `pl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      sourceNodeId: node.id,
-      title: node.title,
-      artist: node.artist || "",
-      album: node.album || "",
-      durationSeconds: node.durationSeconds || null,
-      url: node.bestResource.url,
-      protocolInfo: node.bestResource.protocolInfo || "",
-    };
-
-    state.playlist.push(item);
+    if (!addNodeToPlaylistDomain(state, node)) return;
     setState({ playlist: state.playlist, error: "" });
     setToast("Added to playlist");
   }
@@ -1860,16 +1007,7 @@ function createUi(root, mediaAdapter) {
   }
 
   function makePlaylistItemFromTrack(trackNode) {
-    return {
-      id: `pl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      sourceNodeId: trackNode.id,
-      title: trackNode.title,
-      artist: trackNode.artist || "",
-      album: trackNode.album || "",
-      durationSeconds: trackNode.durationSeconds || null,
-      url: trackNode.bestResource.url,
-      protocolInfo: trackNode.bestResource.protocolInfo || "",
-    };
+    return makePlaylistItemFromTrackDomain(trackNode);
   }
 
   async function addFolderToPlaylist(nodeId) {
@@ -1897,65 +1035,43 @@ function createUi(root, mediaAdapter) {
   }
 
   function removePlaylistItem(id) {
-    const idx = state.playlist.findIndex((x) => x.id === id);
-    if (idx < 0) return;
-
-    const [removed] = state.playlist.splice(idx, 1);
-    const patch = { playlist: state.playlist };
-    if (removed.id === state.nowPlayingPlaylistId) {
-      patch.nowPlayingPlaylistId = "";
-    }
-    setState(patch);
+    if (!removePlaylistItemDomain(state, id)) return;
+    setState({ playlist: state.playlist, nowPlayingPlaylistId: state.nowPlayingPlaylistId });
   }
 
   function clearPlaylist() {
-    if (!state.playlist.length) return;
-    const patch = { playlist: [] };
-    if (state.nowPlayingPlaylistId) patch.nowPlayingPlaylistId = "";
-    setState(patch);
+    if (!clearPlaylistDomain(state)) return;
+    setState({ playlist: state.playlist, nowPlayingPlaylistId: state.nowPlayingPlaylistId });
     setToast("Playlist cleared");
   }
 
   function shufflePlaylist() {
-    if (state.playlist.length < 2) return;
-    const currentId = state.nowPlayingPlaylistId;
-    for (let i = state.playlist.length - 1; i > 0; i -= 1) {
-      const j = Math.floor(Math.random() * (i + 1));
-      const tmp = state.playlist[i];
-      state.playlist[i] = state.playlist[j];
-      state.playlist[j] = tmp;
-    }
-    if (currentId && state.playlist.some((x) => x.id === currentId)) {
-      setState({ playlist: state.playlist, nowPlayingPlaylistId: currentId });
-    } else {
-      setState({ playlist: state.playlist });
-    }
+    if (!shufflePlaylistDomain(state)) return;
+    setState({ playlist: state.playlist, nowPlayingPlaylistId: state.nowPlayingPlaylistId });
     setToast("Playlist shuffled");
   }
 
   function toggleStar(nodeId) {
-    if (!nodeId) return;
-    if (state.stars[nodeId]) delete state.stars[nodeId];
-    else state.stars[nodeId] = true;
-    savePrefsToStorage();
+    if (!toggleStarDomain(state, nodeId)) return;
+    savePrefsToStorage({
+      playMode: state.playMode,
+      stars: state.stars,
+    });
     setState({ stars: state.stars });
   }
 
   function reorderPlaylist(dragId, dropId) {
-    if (!dragId || !dropId || dragId === dropId) return;
-    const from = state.playlist.findIndex((x) => x.id === dragId);
-    const to = state.playlist.findIndex((x) => x.id === dropId);
-    if (from < 0 || to < 0) return;
-    const [moved] = state.playlist.splice(from, 1);
-    state.playlist.splice(to, 0, moved);
+    if (!reorderPlaylistDomain(state, dragId, dropId)) return;
     setState({ playlist: state.playlist });
   }
 
   function cycleMode() {
-    const idx = PLAY_MODES.indexOf(state.playMode);
-    const next = PLAY_MODES[(idx + 1) % PLAY_MODES.length];
+    const next = cycleModeDomain(state.playMode);
     state.playMode = next;
-    savePrefsToStorage();
+    savePrefsToStorage({
+      playMode: state.playMode,
+      stars: state.stars,
+    });
     setState({ playMode: next });
     setToast(`Mode: ${next}`);
   }

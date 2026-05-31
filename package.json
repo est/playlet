@@ -8,7 +8,8 @@
     "clean": "rm -rf dist",
     "dev": "node scripts/dev-server.mjs",
     "serve:dist": "node scripts/dev-server.mjs --dist",
-    "check": "node scripts/check.mjs"
+    "check": "node scripts/check.mjs",
+    "test": "node --test"
   },
   "devDependencies": {
     "esbuild": "^0.28.0"
